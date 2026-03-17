@@ -1,0 +1,239 @@
+// This Pine Script™ strategy is subject to the terms of the Mozilla Public License 2.0
+// © emrehaskilic — Leg Catcher Strategy v1.0
+// Designed for 3-minute chart, crypto futures (BTCUSDT, ETHUSDT etc.)
+
+//@version=5
+strategy("Leg Catcher v1.0", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.02, slippage=1, initial_capital=10000, currency=currency.USD, calc_on_every_tick=false)
+
+// ══════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════
+
+grp_leg     = "── Leg Detection ──"
+consecCandles   = input.int(3, "Lookback Candles", minval=2, maxval=5, group=grp_leg, tooltip="Son kaç muma bakılsın")
+minSameDir      = input.int(2, "Min Same Direction", minval=2, maxval=4, group=grp_leg, tooltip="Kaç tanesi aynı yönde olmalı")
+volMultEntry    = input.float(1.0, "Volume Multiplier (Entry)", minval=0.5, step=0.1, group=grp_leg, tooltip="Hacim ortalamasının kaç katı olmalı")
+volLen          = input.int(20, "Volume MA Length", minval=5, maxval=50, group=grp_leg)
+
+grp_exit    = "── Exit Rules ──"
+atrLen          = input.int(14, "ATR Length", minval=5, maxval=50, group=grp_exit)
+trailAtrMult    = input.float(1.5, "Trailing Stop (ATR x)", minval=0.5, step=0.1, group=grp_exit)
+reversalPct     = input.float(50.0, "Reversal Candle Threshold %", minval=30, maxval=80, group=grp_exit, tooltip="Önceki legin yüzde kaçını silerse çıkış")
+
+grp_filter  = "── Market Filter ──"
+useAtrFilter    = input.bool(true, "ATR Filter (Range Market)", group=grp_filter)
+atrFilterLen    = input.int(50, "ATR Filter MA Length", minval=20, maxval=100, group=grp_filter)
+atrFilterMult   = input.float(0.7, "ATR Min Threshold (x avg)", minval=0.3, step=0.1, group=grp_filter, tooltip="ATR bu seviyenin altındaysa trade yapma")
+
+grp_risk    = "── Risk Management ──"
+dailyMaxLoss    = input.float(1.0, "Daily Max Loss %", minval=0.5, maxval=5.0, step=0.5, group=grp_risk)
+maxTradesDay    = input.int(8, "Max Trades / Day", minval=1, maxval=20, group=grp_risk)
+
+grp_time    = "── Session Filter ──"
+useSession      = input.bool(false, "Use Session Filter", group=grp_time)
+sessionStart    = input.int(8, "Session Start (UTC hour)", minval=0, maxval=23, group=grp_time)
+sessionEnd      = input.int(22, "Session End (UTC hour)", minval=0, maxval=23, group=grp_time)
+
+// ══════════════════════════════════════════════════════════════
+// CALCULATIONS
+// ══════════════════════════════════════════════════════════════
+
+// --- ATR ---
+atr = ta.atr(atrLen)
+atrMA = ta.sma(atr, atrFilterLen)
+
+// --- Volume ---
+volMA = ta.sma(volume, volLen)
+volAboveAvg = volume >= volMA * volMultEntry
+
+// --- Candle Direction ---
+bullCandle = close > open
+bearCandle = close < open
+
+// --- Count consecutive same-direction candles ---
+bullCount = 0
+bearCount = 0
+for i = 0 to consecCandles - 1
+    if close[i] > open[i]
+        bullCount += 1
+    if close[i] < open[i]
+        bearCount += 1
+
+bullLeg = bullCount >= minSameDir
+bearLeg = bearCount >= minSameDir
+
+// --- Volume confirmation (at least 1 of last N candles has high volume) ---
+volConfirm = false
+for i = 0 to consecCandles - 1
+    if volume[i] >= volMA[i] * volMultEntry
+        volConfirm := true
+
+// ══════════════════════════════════════════════════════════════
+// FILTERS
+// ══════════════════════════════════════════════════════════════
+
+// --- ATR Filter: skip range-bound markets ---
+atrOk = useAtrFilter ? atr > atrMA * atrFilterMult : true
+
+// --- Session Filter ---
+utcHour = hour(time, "UTC")
+sessionOk = useSession ? (utcHour >= sessionStart and utcHour < sessionEnd) : true
+
+// --- Daily Loss Guard ---
+var float dayStartEquity = strategy.equity
+var int lastDay = dayofmonth
+if dayofmonth != lastDay
+    dayStartEquity := strategy.equity
+    lastDay := dayofmonth
+
+dayPnLPct = ((strategy.equity - dayStartEquity) / dayStartEquity) * 100
+dailyLossOk = dayPnLPct > -dailyMaxLoss
+
+// --- Daily Trade Count ---
+var int tradesToday = 0
+if dayofmonth != lastDay[1]
+    tradesToday := 0
+
+tradeCountOk = tradesToday < maxTradesDay
+
+// --- All filters combined ---
+filtersOk = atrOk and sessionOk and dailyLossOk and tradeCountOk
+
+// ══════════════════════════════════════════════════════════════
+// ENTRY SIGNALS
+// ══════════════════════════════════════════════════════════════
+
+longEntry  = bullLeg and volConfirm and filtersOk and strategy.position_size == 0
+shortEntry = bearLeg and volConfirm and filtersOk and strategy.position_size == 0
+
+// ══════════════════════════════════════════════════════════════
+// TRAILING STOP CALCULATION
+// ══════════════════════════════════════════════════════════════
+
+var float trailStop = na
+var float legHigh = na
+var float legLow = na
+
+if longEntry
+    legHigh := high
+    trailStop := close - atr * trailAtrMult
+    tradesToday += 1
+
+if shortEntry
+    legLow := low
+    trailStop := close + atr * trailAtrMult
+    tradesToday += 1
+
+// Update trailing stop while in position
+if strategy.position_size > 0
+    legHigh := math.max(legHigh, high)
+    newStop = legHigh - atr * trailAtrMult
+    trailStop := math.max(nz(trailStop), newStop)
+
+if strategy.position_size < 0
+    legLow := math.min(legLow, low)
+    newStop = legLow + atr * trailAtrMult
+    trailStop := math.min(nz(trailStop), newStop)
+
+// ══════════════════════════════════════════════════════════════
+// REVERSAL CANDLE EXIT
+// ══════════════════════════════════════════════════════════════
+
+// Leg gain so far
+var float legStart = na
+
+if longEntry
+    legStart := close
+
+if shortEntry
+    legStart := close
+
+// Reversal detection: strong opposite candle that erases part of the leg
+reversalLongExit = false
+reversalShortExit = false
+
+if strategy.position_size > 0 and not na(legStart)
+    legGain = high - legStart
+    candleDrop = open - close  // bearish candle body
+    if candleDrop > 0 and legGain > 0
+        reversalLongExit := (candleDrop / legGain) * 100 >= reversalPct and bearCandle
+
+if strategy.position_size < 0 and not na(legStart)
+    legGain = legStart - low
+    candleRise = close - open  // bullish candle body
+    if candleRise > 0 and legGain > 0
+        reversalShortExit := (candleRise / legGain) * 100 >= reversalPct and bullCandle
+
+// ══════════════════════════════════════════════════════════════
+// EXECUTE TRADES
+// ══════════════════════════════════════════════════════════════
+
+if longEntry
+    strategy.entry("Long", strategy.long)
+
+if shortEntry
+    strategy.entry("Short", strategy.short)
+
+// --- Exits ---
+// Trailing stop
+if strategy.position_size > 0 and not na(trailStop)
+    strategy.exit("Trail L", "Long", stop=trailStop)
+
+if strategy.position_size < 0 and not na(trailStop)
+    strategy.exit("Trail S", "Short", stop=trailStop)
+
+// Reversal candle exit
+if reversalLongExit
+    strategy.close("Long", comment="Reversal")
+
+if reversalShortExit
+    strategy.close("Short", comment="Reversal")
+
+// ══════════════════════════════════════════════════════════════
+// PLOTS
+// ══════════════════════════════════════════════════════════════
+
+// --- Trailing Stop ---
+plotTrail = plot(strategy.position_size != 0 ? trailStop : na, "Trailing Stop", color=strategy.position_size > 0 ? color.new(color.green, 30) : color.new(color.red, 30), linewidth=2, style=plot.style_linebr)
+
+// --- Entry markers ---
+plotshape(longEntry, "Long Entry", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.small)
+plotshape(shortEntry, "Short Entry", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small)
+
+// --- Reversal Exit markers ---
+plotshape(reversalLongExit, "Rev Exit L", shape.xcross, location.abovebar, color.new(color.orange, 0), size=size.tiny)
+plotshape(reversalShortExit, "Rev Exit S", shape.xcross, location.belowbar, color.new(color.orange, 0), size=size.tiny)
+
+// --- ATR Filter background ---
+bgcolor(useAtrFilter and not atrOk ? color.new(color.gray, 90) : na, title="Range Market Zone")
+
+// --- Daily Loss Lock background ---
+bgcolor(not dailyLossOk ? color.new(color.red, 90) : na, title="Daily Loss Lock")
+
+// ══════════════════════════════════════════════════════════════
+// INFO TABLE
+// ══════════════════════════════════════════════════════════════
+
+var table infoTable = table.new(position.top_right, 2, 7, bgcolor=color.new(color.black, 80), border_width=1)
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "Metric", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 0, "Value", text_color=color.gray, text_size=size.small)
+
+    table.cell(infoTable, 0, 1, "ATR", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 1, str.tostring(atr, "#.##"), text_color=atrOk ? color.green : color.red, text_size=size.small)
+
+    table.cell(infoTable, 0, 2, "Vol/Avg", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 2, str.tostring(volume / volMA, "#.##") + "x", text_color=volAboveAvg ? color.green : color.gray, text_size=size.small)
+
+    table.cell(infoTable, 0, 3, "Bull Count", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 3, str.tostring(bullCount) + "/" + str.tostring(consecCandles), text_color=bullLeg ? color.green : color.gray, text_size=size.small)
+
+    table.cell(infoTable, 0, 4, "Bear Count", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 4, str.tostring(bearCount) + "/" + str.tostring(consecCandles), text_color=bearLeg ? color.red : color.gray, text_size=size.small)
+
+    table.cell(infoTable, 0, 5, "Day PnL", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 5, str.tostring(dayPnLPct, "#.##") + "%", text_color=dayPnLPct >= 0 ? color.green : color.red, text_size=size.small)
+
+    table.cell(infoTable, 0, 6, "Trades Today", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 6, str.tostring(tradesToday) + "/" + str.tostring(maxTradesDay), text_color=tradeCountOk ? color.green : color.orange, text_size=size.small)

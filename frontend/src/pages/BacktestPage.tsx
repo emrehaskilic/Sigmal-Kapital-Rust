@@ -37,7 +37,7 @@ const MONTHS_TR = ["Oca", "Sub", "Mar", "Nis", "May", "Haz", "Tem", "Agu", "Eyl"
 
 /* ── Section wrapper ── */
 const Section = ({ title, children, className = "" }: { title: string; children: React.ReactNode; className?: string }) => (
-  <div className={`bg-[#131d2a]/80 rounded-xl border border-slate-700/20 p-4 ${className}`}>
+  <div className={`bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4 ${className}`}>
     <h2 className="text-sm font-semibold text-slate-300 mb-3">{title}</h2>
     {children}
   </div>
@@ -58,9 +58,7 @@ export default function BacktestPage() {
   const [error, setError] = useState<string | null>(null);
   const [tradeFilter, setTradeFilter] = useState<string>("ALL");
 
-  // Backtest history
-  const [history, setHistory] = useState<{ label: string; result: BacktestResult; config: Config }[]>([]);
-  const [compareIdx, setCompareIdx] = useState<number | null>(null);
+  // (history/compare removed)
 
   const pollRef = useRef<number | null>(null);
 
@@ -86,11 +84,6 @@ export default function BacktestPage() {
             const r = await fetchBacktestResults();
             if (r.metrics) {
               setResult(r);
-              // Auto-save to history
-              if (config) {
-                const label = `${new Date().toLocaleString("tr-TR")} — ${selectedSymbols.length} pair, ${lookbackDays}d`;
-                setHistory(prev => [...prev, { label, result: r, config: { ...config } }]);
-              }
             }
           }
         }
@@ -134,7 +127,6 @@ export default function BacktestPage() {
     setError(null);
     setBtStatus("starting");
     setTradeFilter("ALL");
-    setCompareIdx(null);
     await runBacktest(selectedSymbols, lookbackDays, config);
   };
 
@@ -145,7 +137,6 @@ export default function BacktestPage() {
     setProgress(0);
     setBtStatus("idle");
     setTradeFilter("ALL");
-    setCompareIdx(null);
   };
 
   /* ── Export to CSV ── */
@@ -266,7 +257,7 @@ export default function BacktestPage() {
   const ChartTooltip = ({ active, payload, label }: any) => {
     if (!active || !payload?.length) return null;
     return (
-      <div className="bg-[#0b1217] border border-slate-700/30 rounded-lg px-3 py-2 text-xs">
+      <div className="bg-[#050a14] border border-blue-500/[0.08] rounded-lg px-3 py-2 text-xs">
         <p className="text-slate-400 mb-1">{typeof label === "number" && label > 1e9 ? fmtDate(label) : label}</p>
         {payload.map((p: any) => (
           <p key={p.dataKey} style={{ color: p.color }}>
@@ -278,12 +269,10 @@ export default function BacktestPage() {
     );
   };
 
-  // Comparison result
-  const cmpResult = compareIdx !== null && history[compareIdx] ? history[compareIdx].result : null;
-  const cm = cmpResult?.metrics;
+  const cm: any = null; // comparison removed
 
   return (
-    <div className="min-h-screen bg-[#0b1217] text-slate-200 p-4 md:p-6">
+    <div className="min-h-screen bg-[#050a14] text-slate-200 p-4 md:p-6">
       <div className="max-w-7xl mx-auto space-y-5">
 
         {/* ── Header ── */}
@@ -294,7 +283,7 @@ export default function BacktestPage() {
 
         {/* ── Config Panel ── */}
         {config && (
-          <div className="bg-[#131d2a]/80 rounded-xl border border-slate-700/20 p-4 space-y-4">
+          <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4 space-y-4">
             {/* Trading */}
             <div>
               <h2 className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-2">Trading</h2>
@@ -309,14 +298,14 @@ export default function BacktestPage() {
                     <input type="number" step={step}
                       value={(config as any)[section][key]}
                       onChange={(e) => handleConfigChange(section, key, +e.target.value)}
-                      className="w-full bg-[#0b1217] border border-slate-700/30 rounded-lg px-2 py-1 text-sm font-mono text-slate-200" />
+                      className="w-full bg-[#050a14] border border-blue-500/[0.08] rounded-lg px-2 py-1 text-sm font-mono text-slate-200" />
                   </label>
                 ))}
                 <label className="space-y-1">
                   <span className="text-slate-500 text-[10px] uppercase">Islem Tipi</span>
                   <select value={config.trading.trade_type}
                     onChange={(e) => handleConfigChange("trading", "trade_type", e.target.value)}
-                    className="w-full bg-[#0b1217] border border-slate-700/30 rounded-lg px-2 py-1 text-sm text-slate-200">
+                    className="w-full bg-[#050a14] border border-blue-500/[0.08] rounded-lg px-2 py-1 text-sm text-slate-200">
                     {["BOTH", "LONG", "SHORT"].map(t => <option key={t} value={t}>{t}</option>)}
                   </select>
                 </label>
@@ -341,7 +330,7 @@ export default function BacktestPage() {
         )}
 
         {/* ── Pair Selection + Controls ── */}
-        <div className="bg-[#131d2a]/80 rounded-xl border border-slate-700/20 p-4">
+        <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4">
           <div className="flex items-center gap-3 mb-3 flex-wrap">
             <h2 className="text-sm font-semibold text-slate-300">Pair Secimi</h2>
             <span className="text-[10px] text-slate-500">{selectedSymbols.length}/50</span>
@@ -351,7 +340,7 @@ export default function BacktestPage() {
               <input type="number" min={1} max={365} step={1}
                 value={lookbackDays}
                 onChange={(e) => setLookbackDays(+e.target.value)}
-                className="w-16 bg-[#0b1217] border border-slate-700/30 rounded-lg px-2 py-1 text-sm font-mono text-slate-200" />
+                className="w-16 bg-[#050a14] border border-blue-500/[0.08] rounded-lg px-2 py-1 text-sm font-mono text-slate-200" />
               <span className="text-slate-500">gun</span>
             </label>
             {result && !running && (
@@ -372,12 +361,12 @@ export default function BacktestPage() {
               <input type="text" value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Pair ara... (BTCUSDT)"
-                className="w-full bg-[#0b1217] border border-slate-700/30 rounded-lg px-3 py-1.5 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-sky-500/50" />
+                className="w-full bg-[#050a14] border border-blue-500/[0.08] rounded-lg px-3 py-1.5 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-sky-500/50" />
               {searchQuery && filteredSymbols.length > 0 && (
-                <div className="absolute z-10 top-full left-0 right-0 mt-1 bg-[#0b1217] border border-slate-700/30 rounded-lg max-h-48 overflow-y-auto">
+                <div className="absolute z-10 top-full left-0 right-0 mt-1 bg-[#050a14] border border-blue-500/[0.08] rounded-lg max-h-48 overflow-y-auto">
                   {filteredSymbols.slice(0, 20).map((s) => (
                     <button key={s} onClick={() => handleAddPair(s)}
-                      className="w-full text-left px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700/20 transition-colors">
+                      className="w-full text-left px-3 py-1.5 text-xs text-slate-300 hover:bg-blue-500/10 transition-colors">
                       {s}
                     </button>
                   ))}
@@ -390,7 +379,7 @@ export default function BacktestPage() {
             <div className="flex flex-wrap gap-2">
               {selectedSymbols.map((s) => (
                 <button key={s} onClick={() => handleRemovePair(s)}
-                  className="flex items-center gap-1 px-2 py-1 rounded bg-slate-700/20 text-xs text-slate-300 hover:bg-red-500/20 hover:text-red-400 transition-colors">
+                  className="flex items-center gap-1 px-2 py-1 rounded bg-blue-500/10 text-xs text-slate-300 hover:bg-red-500/20 hover:text-red-400 transition-colors">
                   {s} <span className="text-slate-500 hover:text-red-400">&times;</span>
                 </button>
               ))}
@@ -400,12 +389,12 @@ export default function BacktestPage() {
 
         {/* ── Progress Bar ── */}
         {running && (
-          <div className="bg-[#131d2a]/80 rounded-xl border border-slate-700/20 p-4">
+          <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4">
             <div className="flex items-center justify-between text-xs mb-2">
               <span className="text-slate-400">{btStatus === "fetching" ? "Veri indiriliyor..." : btStatus === "computing" ? "Sinyaller hesaplaniyor..." : btStatus === "simulating" ? "Simulasyon calisiyor..." : "Metrikler hesaplaniyor..."}</span>
               <span className="text-slate-500 font-mono">{progress.toFixed(0)}%</span>
             </div>
-            <div className="w-full h-2 bg-slate-700/40 rounded-full overflow-hidden">
+            <div className="w-full h-2 bg-blue-500/20 rounded-full overflow-hidden">
               <div className="h-full bg-sky-500 transition-all duration-300 rounded"
                 style={{ width: `${progress}%` }} />
             </div>
@@ -439,18 +428,6 @@ export default function BacktestPage() {
                 JSON Rapor Indir
               </button>
               <div className="flex-1" />
-              {history.length > 1 && (
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="text-slate-500">Karsilastir:</span>
-                  <select value={compareIdx ?? ""} onChange={e => setCompareIdx(e.target.value === "" ? null : +e.target.value)}
-                    className="bg-[#0b1217] border border-slate-700/30 rounded-lg px-2 py-1 text-xs text-slate-200">
-                    <option value="">--</option>
-                    {history.slice(0, -1).map((h, i) => (
-                      <option key={i} value={i}>{h.label}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
             </div>
 
             {/* ── Summary Metrics Row 1 ── */}
@@ -511,7 +488,7 @@ export default function BacktestPage() {
                 <div className="overflow-x-auto">
                   <table className="w-full text-xs">
                     <thead>
-                      <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-slate-700/20">
+                      <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-blue-500/[0.08]">
                         <th className="text-left py-2 px-2">Symbol</th>
                         <th className="text-right py-2 px-2">Islem</th>
                         <th className="text-right py-2 px-2">Kazanan</th>
@@ -527,7 +504,7 @@ export default function BacktestPage() {
                     </thead>
                     <tbody>
                       {result!.per_symbol.map((ps) => (
-                        <tr key={ps.symbol} className="border-b border-slate-700/10 hover:bg-slate-700/20/30">
+                        <tr key={ps.symbol} className="border-b border-blue-500/[0.06] hover:bg-blue-500/10/30">
                           <td className="py-1.5 px-2 font-semibold">{ps.symbol}</td>
                           <td className="py-1.5 px-2 text-right">{ps.total_trades}</td>
                           <td className="py-1.5 px-2 text-right text-emerald-400">{ps.winning_trades}</td>
@@ -590,7 +567,7 @@ export default function BacktestPage() {
                       { label: "LONG", data: ld, color: "emerald" },
                       { label: "SHORT", data: sd, color: "red" },
                     ].map(({ label, data, color }) => (
-                      <div key={label} className={`bg-[#0b1217]/60 rounded-lg p-3 border-l-2 border-${color}-400/40`}>
+                      <div key={label} className={`bg-[#050a14]/60 rounded-lg p-3 border-l-2 border-${color}-400/40`}>
                         <div className="flex items-center gap-2 mb-2">
                           <span className={`text-sm font-bold text-${color}-400`}>{label}</span>
                           <span className="text-[10px] text-slate-500">{data.count} islem</span>
@@ -648,7 +625,7 @@ export default function BacktestPage() {
                   <div className="overflow-x-auto">
                     <table className="w-full text-xs">
                       <thead>
-                        <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-slate-700/20">
+                        <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-blue-500/[0.08]">
                           <th className="text-left py-2 px-2">Neden</th>
                           <th className="text-right py-2 px-2">Islem</th>
                           <th className="text-right py-2 px-2">Oran</th>
@@ -659,7 +636,7 @@ export default function BacktestPage() {
                       </thead>
                       <tbody>
                         {data.map(r => (
-                          <tr key={r.reason} className="border-b border-slate-700/10">
+                          <tr key={r.reason} className="border-b border-blue-500/[0.06]">
                             <td className="py-1.5 px-2">
                               <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
                                 r.reason.startsWith("TP") ? "bg-emerald-400/10 text-emerald-300" :
@@ -747,7 +724,7 @@ export default function BacktestPage() {
                       : `rgba(239, 68, 68, ${0.1 + intensity * 0.5})`;
                     const [y, mo] = month.split("-");
                     return (
-                      <div key={month} className="rounded-lg p-3 text-center min-w-[80px] border border-slate-700/20"
+                      <div key={month} className="rounded-lg p-3 text-center min-w-[80px] border border-blue-500/[0.08]"
                         style={{ backgroundColor: bg }}>
                         <div className="text-[10px] text-slate-400 mb-1">{MONTHS_TR[+mo - 1]} {y}</div>
                         <div className={`text-sm font-mono font-semibold ${pnl >= 0 ? "text-emerald-300" : "text-red-300"}`}>
@@ -772,7 +749,7 @@ export default function BacktestPage() {
                       if (!active || !payload?.length) return null;
                       const d = payload[0].payload;
                       return (
-                        <div className="bg-[#0b1217] border border-slate-700/30 rounded-lg px-3 py-2 text-xs">
+                        <div className="bg-[#050a14] border border-blue-500/[0.08] rounded-lg px-3 py-2 text-xs">
                           <p className="text-slate-400">Aralik: {d.bin} USDT</p>
                           <p className="text-slate-200">{d.count} islem</p>
                         </div>
@@ -827,7 +804,7 @@ export default function BacktestPage() {
                       if (!active || !payload?.length) return null;
                       const d = payload[0].payload;
                       return (
-                        <div className="bg-[#0b1217] border border-slate-700/30 rounded-lg px-3 py-2 text-xs">
+                        <div className="bg-[#050a14] border border-blue-500/[0.08] rounded-lg px-3 py-2 text-xs">
                           <p className="font-semibold">{d.symbol} ({d.side})</p>
                           <p className="text-slate-400">Sure: {d.duration} dk</p>
                           <p className={d.pnl >= 0 ? "text-emerald-400" : "text-red-400"}>PnL: {formatNum(d.pnl, 4, true)} USDT</p>
@@ -854,7 +831,7 @@ export default function BacktestPage() {
                     <Tooltip content={({ active, payload }: any) => {
                       if (!active || !payload?.length) return null;
                       return (
-                        <div className="bg-[#0b1217] border border-slate-700/30 rounded-lg px-3 py-2 text-xs">
+                        <div className="bg-[#050a14] border border-blue-500/[0.08] rounded-lg px-3 py-2 text-xs">
                           <p className="text-slate-400">Islem #{payload[0].payload.idx}</p>
                           <p className="text-sky-400">Win Rate: {payload[0].value}%</p>
                         </div>
@@ -881,7 +858,7 @@ export default function BacktestPage() {
                       if (!active || !payload?.length) return null;
                       const t = payload[0].payload as BacktestTrade;
                       return (
-                        <div className="bg-[#0b1217] border border-slate-700/30 rounded-lg px-3 py-2 text-xs">
+                        <div className="bg-[#050a14] border border-blue-500/[0.08] rounded-lg px-3 py-2 text-xs">
                           <p className="font-semibold mb-1">{t.symbol} #{t.id}</p>
                           <p className="text-slate-400">{t.side} — {t.exit_reason}</p>
                           <p>Entry: {formatNum(t.entry_price, 4)}</p>
@@ -911,15 +888,15 @@ export default function BacktestPage() {
               <Section title={`Islem Listesi (${filtered.length})`}>
                 <div className="flex items-center gap-3 mb-3">
                   <select value={tradeFilter} onChange={(e) => setTradeFilter(e.target.value)}
-                    className="bg-[#0b1217] border border-slate-700/30 rounded-lg px-2 py-1 text-xs text-slate-200">
+                    className="bg-[#050a14] border border-blue-500/[0.08] rounded-lg px-2 py-1 text-xs text-slate-200">
                     <option value="ALL">Tum Pairler</option>
                     {uniqueSyms.map(s => <option key={s} value={s}>{s}</option>)}
                   </select>
                 </div>
                 <div className="overflow-x-auto max-h-96 overflow-y-auto">
                   <table className="w-full text-xs">
-                    <thead className="sticky top-0 bg-[#131d2a]">
-                      <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-slate-700/20">
+                    <thead className="sticky top-0 bg-[#0a1628]">
+                      <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-blue-500/[0.08]">
                         <th className="text-left py-2 px-2">#</th>
                         <th className="text-left py-2 px-2">Symbol</th>
                         <th className="text-center py-2">Side</th>
@@ -935,7 +912,7 @@ export default function BacktestPage() {
                     </thead>
                     <tbody>
                       {filtered.map((t) => (
-                        <tr key={t.id} className="border-b border-slate-700/10 hover:bg-slate-700/10">
+                        <tr key={t.id} className="border-b border-blue-500/[0.06] hover:bg-blue-500/10">
                           <td className="py-1.5 px-2 text-slate-500">{t.id}</td>
                           <td className="py-1.5 px-2 font-semibold">{t.symbol}</td>
                           <td className="py-1.5 text-center">
@@ -1016,7 +993,7 @@ export default function BacktestPage() {
                   <div className="overflow-x-auto">
                     <table className="w-full text-xs">
                       <thead>
-                        <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-slate-700/20">
+                        <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-blue-500/[0.08]">
                           <th className="text-left py-2 px-2">Gun</th>
                           <th className="text-right py-2 px-2">Islem</th>
                           <th className="text-right py-2 px-2">Kazanan</th>
@@ -1028,7 +1005,7 @@ export default function BacktestPage() {
                       </thead>
                       <tbody>
                         {days.map(d => (
-                          <tr key={d.day} className={`border-b border-slate-700/10 ${
+                          <tr key={d.day} className={`border-b border-blue-500/[0.06] ${
                             d.day === bestDay?.day ? "bg-emerald-400/5" :
                             d.day === worstDay?.day ? "bg-red-400/5" : ""
                           }`}>
@@ -1093,7 +1070,7 @@ export default function BacktestPage() {
               <Section title="Saat Bazli Performans Analizi (UTC)">
                 <div className="space-y-4">
                   {analysisData.map(({ symbol, hours, bestHour, worstHour }) => (
-                    <div key={symbol} className="bg-[#0b1217]/60 rounded-lg p-3">
+                    <div key={symbol} className="bg-[#050a14]/60 rounded-lg p-3">
                       <div className="flex items-center gap-3 mb-2">
                         <span className="text-sm font-semibold text-slate-200">{symbol}</span>
                         <span className="text-[10px] text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded">
@@ -1106,7 +1083,7 @@ export default function BacktestPage() {
                       <div className="overflow-x-auto">
                         <table className="w-full text-xs">
                           <thead>
-                            <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-slate-700/20">
+                            <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-blue-500/[0.08]">
                               <th className="text-left py-1.5 px-2">Saat (UTC)</th>
                               <th className="text-right py-1.5 px-2">Islem</th>
                               <th className="text-right py-1.5 px-2">Kazanan</th>
@@ -1118,7 +1095,7 @@ export default function BacktestPage() {
                           </thead>
                           <tbody>
                             {hours.map((h) => (
-                              <tr key={h.hour} className={`border-b border-slate-700/10 ${
+                              <tr key={h.hour} className={`border-b border-blue-500/[0.06] ${
                                 h.hour === bestHour.hour ? "bg-emerald-400/5" :
                                 h.hour === worstHour.hour ? "bg-red-400/5" : ""
                               }`}>
@@ -1149,45 +1126,6 @@ export default function BacktestPage() {
               );
             })()}
 
-            {/* ── Backtest History ── */}
-            {history.length > 0 && (
-              <Section title={`Backtest Gecmisi (${history.length})`}>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-slate-700/20">
-                        <th className="text-left py-2 px-2">#</th>
-                        <th className="text-left py-2 px-2">Tarih</th>
-                        <th className="text-right py-2 px-2">Islem</th>
-                        <th className="text-right py-2 px-2">Win Rate</th>
-                        <th className="text-right py-2 px-2">PnL</th>
-                        <th className="text-right py-2 px-2">PF</th>
-                        <th className="text-right py-2 px-2">Sharpe</th>
-                        <th className="text-right py-2 px-2">Max DD</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {history.map((h, i) => {
-                        const hm = h.result.metrics;
-                        const isCurrent = i === history.length - 1;
-                        return (
-                          <tr key={i} className={`border-b border-slate-700/10 ${isCurrent ? "bg-sky-400/5" : "hover:bg-slate-700/10"}`}>
-                            <td className="py-1.5 px-2 text-slate-500">{i + 1}</td>
-                            <td className="py-1.5 px-2">{h.label} {isCurrent && <span className="text-sky-400 text-[10px]">(mevcut)</span>}</td>
-                            <td className="py-1.5 px-2 text-right">{hm.total_trades}</td>
-                            <td className={`py-1.5 px-2 text-right ${hm.win_rate >= 50 ? "text-emerald-400" : "text-red-400"}`}>{formatNum(hm.win_rate, 1)}%</td>
-                            <td className={`py-1.5 px-2 text-right font-mono ${pnlColor(hm.total_pnl)}`}>{formatNum(hm.total_pnl, 2, true)}</td>
-                            <td className={`py-1.5 px-2 text-right ${hm.profit_factor >= 1 ? "text-emerald-400" : "text-red-400"}`}>{formatNum(hm.profit_factor, 2)}</td>
-                            <td className="py-1.5 px-2 text-right">{formatNum(hm.sharpe_ratio, 3)}</td>
-                            <td className="py-1.5 px-2 text-right text-red-400">{formatNum(hm.max_drawdown_pct, 2)}%</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </Section>
-            )}
           </>
         )}
 

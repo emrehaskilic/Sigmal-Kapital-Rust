@@ -4,11 +4,10 @@ PMax determines macro trend. Keltner Channels determine DCA/TP levels:
   LONG:  Limit BUY  at KC Lower Band (DCA)  |  Limit SELL at KC Upper Band (TP)
   SHORT: Limit SELL at KC Upper Band (DCA)  |  Limit BUY  at KC Lower Band (TP)
 
-Dynamic Compounding:
-  Balance < $50K  → comp_pct = 10%  (aggressive growth)
-  $50K - $100K    → comp_pct = 10%  (growth continues)
-  $100K - $200K   → comp_pct = 5%   (protect profits)
-  $200K+          → comp_pct = 2%   (defense mode)
+Dynamic Compounding (Kelly):
+  Balance < $30K   → comp_pct = 3.0%  (kontrollü)
+  $30K - $150K     → comp_pct = 5.0%  (büyüme)
+  $150K+           → comp_pct = 2.25% (muhafazakâr)
 
   step_margin = balance * comp_pct / 100
 
@@ -91,7 +90,7 @@ class RiskManager:
     def __init__(self, config: dict, risk_config: dict | None = None) -> None:
         trading = config.get("trading", {})
         self._margin_per_trade = trading.get("margin_per_trade", 100.0)
-        self._leverage = trading.get("leverage", 40)
+        self._leverage = trading.get("leverage", 25)
 
         # Dynamic compounding config
         strategy = config.get("strategy", {})
@@ -115,6 +114,11 @@ class RiskManager:
         self._dyn_sl_atr_mult = dyn_sl_cfg.get("atr_multiplier", 2.5)
         self._dyn_sl_atr_period = dyn_sl_cfg.get("atr_period", 12)
         self._dyn_sl_tighten = dyn_sl_cfg.get("tighten_on_dca_full", 0.95)
+
+        # Percentage-based hard stop (triggers after DCA full)
+        pct_stop_cfg = trading.get("pct_hard_stop", {})
+        self._pct_stop_enabled = pct_stop_cfg.get("enabled", False)
+        self._pct_stop_loss = pct_stop_cfg.get("loss_pct", 2.5)  # % loss threshold
 
     def get_step_margin(self, balance: float) -> float:
         """Calculate step margin using dynamic compounding or fixed margin."""
@@ -195,6 +199,42 @@ class RiskManager:
             sl_price = pos.average_entry_price + sl_dist
             if candle_close >= sl_price:
                 return True, sl_price
+
+        return False, 0.0
+
+    def check_pct_hard_stop(
+        self, pos: PositionState, candle_close: float,
+    ) -> tuple[bool, float]:
+        """Percentage-based hard stop — triggers only after all DCA steps are filled.
+
+        LONG:  loss_pct = (avg_entry - close) / avg_entry * 100
+        SHORT: loss_pct = (close - avg_entry) / avg_entry * 100
+        If loss_pct >= threshold → exit at candle close.
+
+        Returns (triggered, exit_price).
+        """
+        if not self._pct_stop_enabled or pos.condition == 0.0:
+            return False, 0.0
+
+        # Only trigger after all DCA steps are filled
+        if pos.dca_fills_count < self._max_dca_steps:
+            return False, 0.0
+
+        avg = pos.average_entry_price
+        if avg <= 0:
+            return False, 0.0
+
+        if pos.side == "LONG":
+            loss_pct = (avg - candle_close) / avg * 100
+        else:
+            loss_pct = (candle_close - avg) / avg * 100
+
+        if loss_pct >= self._pct_stop_loss:
+            logger.info(
+                "[PCT_STOP] %s %s loss=%.2f%% >= %.2f%% | avg=%.4f close=%.4f",
+                pos.symbol, pos.side, loss_pct, self._pct_stop_loss, avg, candle_close,
+            )
+            return True, candle_close
 
         return False, 0.0
 

@@ -1,0 +1,368 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Scalper Bot v2 — Non-Repainting + EMA/RSI/ATR Filters
+// Matches Python bot logic exactly
+
+//@version=5
+VERSION = 'v2_filtered'
+strategy(
+  'Scalper Bot ' + VERSION,
+  shorttitle              = 'SB ' + VERSION,
+  overlay                 = true,
+  explicit_plot_zorder    = true,
+  pyramiding              = 0,
+  default_qty_type        = strategy.percent_of_equity,
+  default_qty_value       = 10,
+  calc_on_every_tick      = false,
+  process_orders_on_close = true)
+
+// ============================================================
+// INPUTS
+// ============================================================
+
+G_SIGNAL = '■ Signal Settings'
+res                       = input.timeframe('15',  'TIMEFRAME',                          group = G_SIGNAL)
+useRes                    = input(true,            'Use Alternate Signals',               group = G_SIGNAL)
+intRes                    = input(8,               'Multiplier for Alternate Signals',    group = G_SIGNAL)
+basisType                 = input.string('ALMA',   'MA Type',  options=['TEMA', 'HullMA', 'ALMA'], group = G_SIGNAL)
+basisLen                  = input.int(2,           'MA Period', minval=1,                 group = G_SIGNAL)
+offsetSigma               = input.int(5,           'Sigma for ALMA',       minval=0,     group = G_SIGNAL)
+offsetALMA                = input.float(0.85,      'Offset for ALMA',      minval=0, step=0.01, group = G_SIGNAL)
+delayOffset               = input.int(1,           'Delay Open/Close MA',  minval=0, step=1,
+                  tooltip = 'Set to 1 for Non-Repainting (REQUIRED)',                    group = G_SIGNAL)
+tradeType                 = input.string('BOTH',   'Trade Direction',
+                  options = ['LONG', 'SHORT', 'BOTH', 'NONE'],                           group = G_SIGNAL)
+
+// --- FILTERS ---
+G_FILTER = '■ Signal Filters'
+useEmaFilter              = input.bool(true,       'EMA Trend Filter',                   group = G_FILTER)
+emaPeriod                 = input.int(144,         'EMA Period',           minval=1,      group = G_FILTER)
+useRsiFilter              = input.bool(true,       'RSI Filter',                         group = G_FILTER)
+rsiPeriod                 = input.int(28,          'RSI Period',           minval=1,      group = G_FILTER)
+rsiOB                     = input.int(65,          'RSI Overbought',       minval=50,     group = G_FILTER)
+rsiOS                     = input.int(35,          'RSI Oversold',         minval=1, maxval=50, group = G_FILTER)
+useAtrFilter              = input.bool(true,       'ATR Volatility Filter',              group = G_FILTER)
+atrFilterPeriod           = input.int(50,          'ATR Period',           minval=1,      group = G_FILTER)
+atrMinPercentile          = input.float(20,        'Min ATR Percentile',   minval=0, maxval=100, step=5, group = G_FILTER)
+
+// --- RISK ---
+G_RISK = '■ Risk Management'
+i_lxLvlTP1   = input.float(1,    'Level TP1 (%)',   group = G_RISK)
+i_lxQtyTP1   = input.float(50,   'Qty   TP1 (%)',   group = G_RISK)
+i_lxLvlTP2   = input.float(1.5,  'Level TP2 (%)',   group = G_RISK)
+i_lxQtyTP2   = input.float(30,   'Qty   TP2 (%)',   group = G_RISK)
+i_lxLvlTP3   = input.float(2,    'Level TP3 (%)',   group = G_RISK)
+i_lxQtyTP3   = input.float(20,   'Qty   TP3 (%)',   group = G_RISK)
+i_lxLvlSL    = input.float(0.5,  'Stop Loss (%)',   group = G_RISK)
+
+i_sxLvlTP1   = i_lxLvlTP1
+i_sxQtyTP1   = i_lxQtyTP1
+i_sxLvlTP2   = i_lxLvlTP2
+i_sxQtyTP2   = i_lxQtyTP2
+i_sxLvlTP3   = i_lxLvlTP3
+i_sxQtyTP3   = i_lxQtyTP3
+i_sxLvlSL    = i_lxLvlSL
+
+// --- WEBHOOK ---
+G_MSG = '■ Webhook Message'
+i_leMsg      = input.string('Long Entry',  'Long Entry',   group = G_MSG)
+i_lxMsgSL    = input.string('Long SL',     'Long SL',      group = G_MSG)
+i_lxMsgTP1   = input.string('Long TP1',    'Long TP1',     group = G_MSG)
+i_lxMsgTP2   = input.string('Long TP2',    'Long TP2',     group = G_MSG)
+i_lxMsgTP3   = input.string('Long TP3',    'Long TP3',     group = G_MSG)
+i_lxMsg      = input.string('Long Exit',   'Long Exit',    group = G_MSG)
+i_seMsg      = input.string('Short Entry', 'Short Entry',  group = G_MSG)
+i_sxMsgSL    = input.string('Short SL',    'Short SL',     group = G_MSG)
+i_sxMsgTP1   = input.string('Short TP1',   'Short TP1',    group = G_MSG)
+i_sxMsgTP2   = input.string('Short TP2',   'Short TP2',    group = G_MSG)
+i_sxMsgTP3   = input.string('Short TP3',   'Short TP3',    group = G_MSG)
+i_sxMsg      = input.string('Short Exit',  'Short Exit',   group = G_MSG)
+
+// --- DISPLAY ---
+G_DISPLAY = '■ Display'
+i_alertOn    = input.bool(true,  'Alert Labels On/Off',   group = G_DISPLAY)
+i_showFilter = input.bool(true,  'Show Filter Status',    group = G_DISPLAY)
+
+// ============================================================
+// MA VARIANT FUNCTION
+// ============================================================
+variant(type, src, len, offSig, offALMA) =>
+    v1  = ta.sma(src, len)
+    v2  = ta.ema(src, len)
+    v4  = 3 * (v2 - ta.ema(v2, len)) + ta.ema(ta.ema(v2, len), len)  // TEMA
+    v8  = ta.wma(2 * ta.wma(src, len / 2) - ta.wma(src, len), math.round(math.sqrt(len)))  // Hull
+    v10 = ta.alma(src, len, offALMA, offSig)  // ALMA
+    type == 'TEMA' ? v4 : type == 'HullMA' ? v8 : type == 'ALMA' ? v10 : v1
+
+// ============================================================
+// ALTERNATE RESOLUTION
+// ============================================================
+stratRes = timeframe.ismonthly  ? str.tostring(timeframe.multiplier * intRes, '###M') :
+           timeframe.isweekly   ? str.tostring(timeframe.multiplier * intRes, '###W') :
+           timeframe.isdaily    ? str.tostring(timeframe.multiplier * intRes, '###D') :
+           timeframe.isintraday ? str.tostring(timeframe.multiplier * intRes, '####') :
+           '60'
+
+// NON-REPAINTING security wrapper
+// delayOffset=1 uses [1] which with lookahead_on = confirmed previous bar data
+reso(exp, use, res) =>
+    security_1 = request.security(syminfo.tickerid, res, exp, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+    use ? security_1 : exp
+
+// MA series with delay offset for non-repainting
+closeSeries    = variant(basisType, close[delayOffset], basisLen, offsetSigma, offsetALMA)
+openSeries     = variant(basisType, open[delayOffset],  basisLen, offsetSigma, offsetALMA)
+closeSeriesAlt = reso(closeSeries, useRes, stratRes)
+openSeriesAlt  = reso(openSeries,  useRes, stratRes)
+
+// ============================================================
+// FILTER CALCULATIONS
+// ============================================================
+
+// --- EMA Trend Filter ---
+emaLine        = ta.ema(close, emaPeriod)
+emaBull        = close > emaLine
+emaBear        = close < emaLine
+
+// --- RSI Filter ---
+rsiVal         = ta.rsi(close, rsiPeriod)
+rsiEma         = ta.ema(rsiVal, 10)
+rsiIsOB        = rsiVal > rsiOB and rsiVal > rsiEma
+rsiIsOS        = rsiVal < rsiOS and rsiVal < rsiEma
+
+// --- ATR Volatility Filter ---
+atrVal         = ta.atr(atrFilterPeriod)
+// Percentile approximation: compare current ATR to recent range
+atrHigh200     = ta.highest(atrVal, 200)
+atrLow200      = ta.lowest(atrVal, 200)
+atrPctRank     = (atrVal - atrLow200) / math.max(atrHigh200 - atrLow200, 0.0000001) * 100
+atrSufficient  = atrPctRank >= atrMinPercentile
+
+// Combined filter functions
+f_longAllowed() =>
+    bool allowed = true
+    if useEmaFilter and not emaBull
+        allowed := false
+    if useRsiFilter and rsiIsOB
+        allowed := false
+    if useAtrFilter and not atrSufficient
+        allowed := false
+    allowed
+
+f_shortAllowed() =>
+    bool allowed = true
+    if useEmaFilter and not emaBear
+        allowed := false
+    if useRsiFilter and rsiIsOS
+        allowed := false
+    if useAtrFilter and not atrSufficient
+        allowed := false
+    allowed
+
+// ============================================================
+// SIGNAL TRIGGERS (with filters applied)
+// ============================================================
+rawLeTrigger = ta.crossover (closeSeriesAlt, openSeriesAlt)
+rawSeTrigger = ta.crossunder(closeSeriesAlt, openSeriesAlt)
+
+leTrigger    = rawLeTrigger and f_longAllowed()
+seTrigger    = rawSeTrigger and f_shortAllowed()
+lxTrigger    = false
+sxTrigger    = false
+
+// ============================================================
+// TP / SL CALCULATIONS
+// ============================================================
+i_src = close
+
+f_tp(_condition, _conditionValue, _leTrigger, _seTrigger, _src, _lxLvlTP, _sxLvlTP) =>
+    var float _tpLine = 0.0
+    _topLvl     = _src + (_src * (_lxLvlTP / 100))
+    _botLvl     = _src - (_src * (_sxLvlTP / 100))
+    _tpLine    := _condition[1] !=  _conditionValue and _leTrigger ? _topLvl :
+                  _condition[1] != -_conditionValue and _seTrigger ? _botLvl :
+                  nz(_tpLine[1])
+    [_tpLine]
+
+f_cross(_scr1, _scr2, _over) =>
+    _cross = _over ? _scr1 > _scr2 and _scr1[1] < _scr2[1] :
+                     _scr1 < _scr2 and _scr1[1] > _scr2[1]
+
+// ============================================================
+// CONDITION STATE MACHINE
+// ============================================================
+var float condition = 0.0
+var float slLine    = 0.0
+var float entryLine = 0.0
+
+entryLine   := leTrigger and condition[1] <=  0.0 ? close :
+               seTrigger and condition[1] >=  0.0 ? close : nz(entryLine[1])
+
+// SL
+slTopLvl    = i_src + (i_src * (i_lxLvlSL / 100))
+slBotLvl    = i_src - (i_src * (i_sxLvlSL / 100))
+slLine     := condition[1] <=  0.0 and leTrigger ? slBotLvl :
+              condition[1] >=  0.0 and seTrigger ? slTopLvl : nz(slLine[1])
+slLong      = f_cross(low,  slLine, false)
+slShort     = f_cross(high, slLine, true )
+
+// TP1, TP2, TP3
+[tp3Line]   = f_tp(condition, 1.2, leTrigger, seTrigger, i_src, i_lxLvlTP3, i_sxLvlTP3)
+[tp2Line]   = f_tp(condition, 1.1, leTrigger, seTrigger, i_src, i_lxLvlTP2, i_sxLvlTP2)
+[tp1Line]   = f_tp(condition, 1.0, leTrigger, seTrigger, i_src, i_lxLvlTP1, i_sxLvlTP1)
+tp3Long     = f_cross(high, tp3Line, true )
+tp3Short    = f_cross(low,  tp3Line, false)
+tp2Long     = f_cross(high, tp2Line, true )
+tp2Short    = f_cross(low,  tp2Line, false)
+tp1Long     = f_cross(high, tp1Line, true )
+tp1Short    = f_cross(low,  tp1Line, false)
+
+switch
+    leTrigger and condition[1] <=  0.0 => condition :=  1.0
+    seTrigger and condition[1] >=  0.0 => condition := -1.0
+    tp3Long   and condition[1] ==  1.2 => condition :=  1.3
+    tp3Short  and condition[1] == -1.2 => condition := -1.3
+    tp2Long   and condition[1] ==  1.1 => condition :=  1.2
+    tp2Short  and condition[1] == -1.1 => condition := -1.2
+    tp1Long   and condition[1] ==  1.0 => condition :=  1.1
+    tp1Short  and condition[1] == -1.0 => condition := -1.1
+    slLong    and condition[1] >=  1.0 => condition :=  0.0
+    slShort   and condition[1] <= -1.0 => condition :=  0.0
+    lxTrigger and condition[1] >=  1.0 => condition :=  0.0
+    sxTrigger and condition[1] <= -1.0 => condition :=  0.0
+
+longE   = leTrigger and condition[1] <=  0.0 and condition ==  1.0
+shortE  = seTrigger and condition[1] >=  0.0 and condition == -1.0
+longX   = lxTrigger and condition[1] >=  1.0 and condition ==  0.0
+shortX  = sxTrigger and condition[1] <= -1.0 and condition ==  0.0
+longSL  = slLong    and condition[1] >=  1.0 and condition ==  0.0
+shortSL = slShort   and condition[1] <= -1.0 and condition ==  0.0
+longTP1 = tp1Long   and condition[1] ==  1.0 and condition ==  1.1
+shortTP1= tp1Short  and condition[1] == -1.0 and condition == -1.1
+longTP2 = tp2Long   and condition[1] ==  1.1 and condition ==  1.2
+shortTP2= tp2Short  and condition[1] == -1.1 and condition == -1.2
+longTP3 = tp3Long   and condition[1] ==  1.2 and condition ==  1.3
+shortTP3= tp3Short  and condition[1] == -1.2 and condition == -1.3
+
+// ============================================================
+// STRATEGY ORDERS
+// ============================================================
+
+// Long
+if strategy.position_size <= 0 and longE and barstate.isconfirmed
+    strategy.entry('Long', strategy.long, alert_message = i_leMsg, comment = 'LE')
+if strategy.position_size > 0 and condition == 1.0
+    strategy.exit(id = 'LXTP1', from_entry = 'Long', qty_percent = i_lxQtyTP1,
+      limit = tp1Line, stop = slLine,
+      comment_profit = 'LXTP1', comment_loss = 'SL',
+      alert_profit = i_lxMsgTP1, alert_loss = i_lxMsgSL)
+if strategy.position_size > 0 and condition == 1.1
+    strategy.exit(id = 'LXTP2', from_entry = 'Long', qty_percent = i_lxQtyTP2,
+      limit = tp2Line, stop = slLine,
+      comment_profit = 'LXTP2', comment_loss = 'SL',
+      alert_profit = i_lxMsgTP2, alert_loss = i_lxMsgSL)
+if strategy.position_size > 0 and condition == 1.2
+    strategy.exit(id = 'LXTP3', from_entry = 'Long', qty_percent = i_lxQtyTP3,
+      limit = tp3Line, stop = slLine,
+      comment_profit = 'LXTP3', comment_loss = 'SL',
+      alert_profit = i_lxMsgTP3, alert_loss = i_lxMsgSL)
+if longX
+    strategy.close('Long', alert_message = i_lxMsg, comment = 'LX')
+
+// Short
+if strategy.position_size >= 0 and shortE and barstate.isconfirmed
+    strategy.entry('Short', strategy.short, alert_message = i_seMsg, comment = 'SE')
+if strategy.position_size < 0 and condition == -1.0
+    strategy.exit(id = 'SXTP1', from_entry = 'Short', qty_percent = i_sxQtyTP1,
+      limit = tp1Line, stop = slLine,
+      comment_profit = 'SXTP1', comment_loss = 'SL',
+      alert_profit = i_sxMsgTP1, alert_loss = i_sxMsgSL)
+if strategy.position_size < 0 and condition == -1.1
+    strategy.exit(id = 'SXTP2', from_entry = 'Short', qty_percent = i_sxQtyTP2,
+      limit = tp2Line, stop = slLine,
+      comment_profit = 'SXTP2', comment_loss = 'SL',
+      alert_profit = i_sxMsgTP2, alert_loss = i_sxMsgSL)
+if strategy.position_size < 0 and condition == -1.2
+    strategy.exit(id = 'SXTP3', from_entry = 'Short', qty_percent = i_sxQtyTP3,
+      limit = tp3Line, stop = slLine,
+      comment_profit = 'SXTP3', comment_loss = 'SL',
+      alert_profit = i_sxMsgTP3, alert_loss = i_sxMsgSL)
+if shortX
+    strategy.close('Short', alert_message = i_sxMsg, comment = 'SX')
+
+// ============================================================
+// VISUALS
+// ============================================================
+
+// TP/SL Lines
+c_tp    = leTrigger or seTrigger ? na : condition == 0.0 ? na : color.green
+c_entry = leTrigger or seTrigger ? na : condition == 0.0 ? na : color.blue
+c_sl    = leTrigger or seTrigger ? na : condition == 0.0 ? na : color.red
+
+p_tp1 = plot(condition ==  1.0 or condition == -1.0 ? tp1Line : na,
+  'TP1', c_tp, 1, plot.style_linebr)
+p_tp2 = plot(condition ==  1.0 or condition == -1.0 or condition ==  1.1 or condition == -1.1 ? tp2Line : na,
+  'TP2', c_tp, 1, plot.style_linebr)
+p_tp3 = plot(condition ==  1.0 or condition == -1.0 or condition ==  1.1 or condition == -1.1 or condition ==  1.2 or condition == -1.2 ? tp3Line : na,
+  'TP3', c_tp, 1, plot.style_linebr)
+p_entry = plot(condition >= 1.0 or condition <= -1.0 ? entryLine : na,
+  'Entry', c_entry, 1, plot.style_linebr)
+p_sl = plot(condition ==  1.0 or condition == -1.0 or condition ==  1.1 or condition == -1.1 or condition ==  1.2 or condition == -1.2 ? slLine : na,
+  'SL', c_sl, 1, plot.style_linebr)
+
+fill(p_tp3, p_entry, color = leTrigger or seTrigger ? na : color.new(color.green, 90))
+fill(p_entry, p_sl,  color = leTrigger or seTrigger ? na : color.new(color.red, 90))
+
+// EMA Line
+plot(useEmaFilter ? emaLine : na, 'EMA Filter', color.new(color.orange, 30), 2)
+
+// Entry labels
+plotshape(i_alertOn and longE,  title='Long',  text='Long',  textcolor=color.white, color=color.green,
+  style=shape.labelup,   size=size.tiny, location=location.belowbar)
+plotshape(i_alertOn and shortE, title='Short', text='Short', textcolor=color.white, color=color.red,
+  style=shape.labeldown, size=size.tiny, location=location.abovebar)
+
+// Filtered signal markers (raw signal existed but filter blocked it)
+plotshape(i_showFilter and rawLeTrigger and not leTrigger and condition[1] <= 0.0,
+  title='Filtered Long',  text='X', textcolor=color.gray, color=color.new(color.gray, 50),
+  style=shape.labelup,   size=size.tiny, location=location.belowbar)
+plotshape(i_showFilter and rawSeTrigger and not seTrigger and condition[1] >= 0.0,
+  title='Filtered Short', text='X', textcolor=color.gray, color=color.new(color.gray, 50),
+  style=shape.labeldown, size=size.tiny, location=location.abovebar)
+
+// TP/SL hit labels
+plotshape(i_alertOn and longTP1,  title='LTP1', text='TP1', textcolor=color.white, color=color.green, style=shape.labeldown, size=size.tiny, location=location.abovebar)
+plotshape(i_alertOn and longTP2,  title='LTP2', text='TP2', textcolor=color.white, color=color.green, style=shape.labeldown, size=size.tiny, location=location.abovebar)
+plotshape(i_alertOn and longTP3,  title='LTP3', text='TP3', textcolor=color.white, color=color.green, style=shape.labeldown, size=size.tiny, location=location.abovebar)
+plotshape(i_alertOn and shortTP1, title='STP1', text='TP1', textcolor=color.white, color=color.red,   style=shape.labelup,   size=size.tiny, location=location.belowbar)
+plotshape(i_alertOn and shortTP2, title='STP2', text='TP2', textcolor=color.white, color=color.red,   style=shape.labelup,   size=size.tiny, location=location.belowbar)
+plotshape(i_alertOn and shortTP3, title='STP3', text='TP3', textcolor=color.white, color=color.red,   style=shape.labelup,   size=size.tiny, location=location.belowbar)
+plotshape(i_alertOn and longSL,   title='LSL',  text='SL',  textcolor=color.white, color=color.red,   style=shape.labeldown, size=size.tiny, location=location.abovebar)
+plotshape(i_alertOn and shortSL,  title='SSL',  text='SL',  textcolor=color.white, color=color.red,   style=shape.labelup,   size=size.tiny, location=location.belowbar)
+
+// Filter status table
+if i_showFilter and barstate.islast
+    var table filterTbl = table.new(position.top_right, 2, 4, bgcolor = color.new(color.black, 80), border_width = 1)
+    table.cell(filterTbl, 0, 0, 'Filter',    text_color = color.white, text_size = size.small)
+    table.cell(filterTbl, 1, 0, 'Status',    text_color = color.white, text_size = size.small)
+    table.cell(filterTbl, 0, 1, 'EMA(' + str.tostring(emaPeriod) + ')',
+      text_color = color.white, text_size = size.small)
+    table.cell(filterTbl, 1, 1, emaBull ? 'BULL' : 'BEAR',
+      text_color = emaBull ? color.green : color.red, text_size = size.small)
+    table.cell(filterTbl, 0, 2, 'RSI(' + str.tostring(rsiPeriod) + ')',
+      text_color = color.white, text_size = size.small)
+    table.cell(filterTbl, 1, 2, str.tostring(rsiVal, '#.0') + (rsiIsOB ? ' OB' : rsiIsOS ? ' OS' : ' OK'),
+      text_color = rsiIsOB ? color.red : rsiIsOS ? color.red : color.green, text_size = size.small)
+    table.cell(filterTbl, 0, 3, 'ATR Vol',
+      text_color = color.white, text_size = size.small)
+    table.cell(filterTbl, 1, 3, str.tostring(atrPctRank, '#.0') + '%',
+      text_color = atrSufficient ? color.green : color.red, text_size = size.small)
+
+// ============================================================
+// ALERTS
+// ============================================================
+alertcondition(longE,    title='Long Entry',  message='Long Entry')
+alertcondition(shortE,   title='Short Entry', message='Short Entry')
+alertcondition(longSL,   title='Long SL',     message='Long Stop Loss')
+alertcondition(shortSL,  title='Short SL',    message='Short Stop Loss')
+alertcondition(longTP1,  title='Long TP1',    message='Long Take Profit 1')
+alertcondition(shortTP1, title='Short TP1',   message='Short Take Profit 1')

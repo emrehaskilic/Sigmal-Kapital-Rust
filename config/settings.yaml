@@ -1,7 +1,7 @@
-# Scalper Bot Configuration — ETHUSDT DynSL 40x Strategy
-# Adaptive PMax + Keltner Channel DCA/TP + Dynamic Compounding + DYN_SL
-# $10K -> $309,650 | +2997% | DD 23.7% | Ratio 126.5
-# Optimized: 200 trial Optuna | 6 ay OOS | 2026-03-16
+# Scalper Bot Configuration — ETHUSDT Unified WF Strategy (DD25)
+# Adaptive PMax + Keltner Channel DCA/TP + Kelly Dynamic Compounding + PCT Hard Stop
+# $10K -> $369,540 | +3,595.4% | DD 23.3% | WR 93.8% | 4,838 trades
+# Optimized: 1000 trial x 25 hafta Unified WF | Rust Engine 178x | 2026-03-17
 
 exchange:
   name: binance
@@ -15,66 +15,66 @@ strategy:
       timeframe: "3m"
       size_multiplier: 1
 
-      # --- ADAPTIVE PMAX (R3) ---
+      # --- ADAPTIVE PMAX (Unified WF) ---
       pmax:
         source: "hl2"
         adaptive: true
-        # Base parameters (used for vol_ratio calc + static fallback)
+        # Base parameters (sabit, adaptive guncelleme icin temel)
         atr_period: 10
         atr_multiplier: 3.0
         ma_type: "EMA"
         ma_length: 10
         change_atr: true
         normalize_atr: false
-        # Adaptive parameters
-        vol_lookback: 834        # Median ATR penceresi
-        flip_window: 423         # Yon degisimi penceresi
-        mult_base: 4.0           # atr_multiplier = mult_base + vol_ratio * mult_scale
-        mult_scale: 3.0
-        ma_base: 18              # ma_length = ma_base + trend_dist * ma_scale
-        ma_scale: 4.5
-        atr_base: 20             # atr_period = atr_base + flip_count * atr_scale
-        atr_scale: 1.5
-        update_interval: 31      # Her 31 barda bir guncelle
+        # Adaptive parameters (1000 trial x 25 hafta optimize)
+        vol_lookback: 580        # Volatilite median penceresi (bar)
+        flip_window: 440         # Yon degisim sayma penceresi (bar)
+        mult_base: 4.0           # ATR carpan tabani
+        mult_scale: 1.25         # Volatiliteye bagli carpan olcekleme
+        ma_base: 3               # MA uzunluk tabani
+        ma_scale: 5.5            # Trende bagli MA olcekleme
+        atr_base: 19             # ATR period tabani
+        atr_scale: 1.5           # Flip sayisina bagli ATR olcekleme
+        update_interval: 29      # Her 29 barda bir guncelle
 
-      # --- KELTNER CHANNEL (R5) ---
+      # --- KELTNER CHANNEL (Unified WF) ---
       keltner:
-        length: 16
-        multiplier: 1.3
-        atr_period: 13
+        length: 5                # KC EMA periyodu
+        multiplier: 0.8          # KC ATR carpani (bant genisligi)
+        atr_period: 3            # KC ATR periyodu
 
       # --- FILTERS ---
       filters:
         ema_trend:
           enabled: true
-          period: 144
+          period: 144             # EMA(144) trend filtresi
         rsi:
           enabled: true
-          period: 28
-          overbought: 65
-          oversold: 35
+          period: 28              # RSI(28)
+          overbought: 65          # LONG: RSI < 65
+          oversold: 35            # SHORT: RSI > 35
         atr_volatility:
-          enabled: false
+          enabled: true
+          atr_period: 50          # ATR(50) volatilite filtresi
+          min_atr_percentile: 20  # %20 percentile altinda islem yapma
 
-  # --- DYNAMIC COMPOUNDING ---
+  # --- KELLY DYNAMIC COMPOUNDING ---
   dynamic_comp:
     enabled: true
     tiers:
-      - max_balance: 50000
-        comp_pct: 10
-      - max_balance: 100000
-        comp_pct: 10
-      - max_balance: 200000
-        comp_pct: 5
+      - max_balance: 30000
+        comp_pct: 3.0             # < $30K: %3 margin (agresif ama kontrollü)
+      - max_balance: 150000
+        comp_pct: 5.0             # $30K-$150K: %5 margin (buyume)
       - max_balance: 999999999
-        comp_pct: 2
+        comp_pct: 2.25            # > $150K: %2.25 margin (muhafazakar)
 
 trading:
   initial_balance: 10000.0
-  leverage: 40
+  leverage: 25                    # 25x leverage (PDF stratejisi)
   symbols:
     - "ETHUSDT"
-  margin_per_trade: 250.0        # Base margin (dynamic comp overrides)
+  margin_per_trade: 300.0         # Base margin (dynamic comp overrides)
   max_pairs: 1
   trade_type: "BOTH"
   maker_fee: 0.0002
@@ -83,18 +83,21 @@ trading:
 
   # --- RISK ---
   hard_stop:
-    enabled: false               # DynSL handles stops — hard stop disabled (optimizer had no hard stop)
+    enabled: false                # ATR-based hard stop devre disi
     atr_multiplier: 5.0
     atr_period: 11
   dynamic_sl:
-    enabled: true
-    atr_multiplier: 2.5          # close <= avg_entry - 2.5*ATR(12) -> exit
+    enabled: false                # DYN_SL devre disi — PCT hard stop kullaniliyor
+    atr_multiplier: 2.5
     atr_period: 12
-    tighten_on_dca_full: 0.95    # DCA dolduysa mult *= 0.95 (daha siki)
-  max_dca_steps: 1               # Max 1 DCA
-  tp_close_pct: 0.05             # Her TP'de %5 kapat
+    tighten_on_dca_full: 0.95
+  pct_hard_stop:
+    enabled: true                 # Yuzde bazli hard stop AKTIF
+    loss_pct: 2.0                 # DCA full sonrasi %2.0 kayip = pozisyon kapat (DD25->DD22.5)
+  max_dca_steps: 4                # Maksimum 4 DCA adimi
+  tp_close_pct: 0.50              # Her TP'de %50 kapat (yarisini sat)
 
 protection:
-  max_drawdown_pct: 40.0
+  max_drawdown_pct: 25.0          # Max DD %25 siniri (PDF ile uyumlu)
   max_total_margin_pct: 70.0
   max_open_positions: 1

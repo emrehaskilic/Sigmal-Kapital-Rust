@@ -31,10 +31,16 @@ interface MarkerData {
   price: number;
 }
 
+interface GridLevel {
+  price: number;
+  label: string;
+  filled: boolean;
+}
+
 interface ChartDataResponse {
   candles: Candle[];
   markers: MarkerData[];
-  grid_levels: { price: number; label: string; filled: boolean }[];
+  grid_levels: GridLevel[];
   error?: string;
 }
 
@@ -54,6 +60,7 @@ export function PMaxChart({ symbol, botRunning }: Props) {
   const kcLowerRef = useRef<ISeriesApi<"Line"> | null>(null);
   const [loading, setLoading] = useState(true);
   const pollRef = useRef<number | null>(null);
+  const priceLinesRef = useRef<any[]>([]);
 
   // Create chart once
   useEffect(() => {
@@ -61,7 +68,7 @@ export function PMaxChart({ symbol, botRunning }: Props) {
 
     const chart = createChart(containerRef.current, {
       layout: {
-        background: { type: ColorType.Solid, color: "#0b1217" },
+        background: { type: ColorType.Solid, color: "#050a14" },
         textColor: "#94a3b8",
         fontSize: 11,
       },
@@ -182,6 +189,46 @@ export function PMaxChart({ symbol, botRunning }: Props) {
         kl.setData(kcLowerPts);
       }
 
+      // Remove old price lines
+      for (const pl of priceLinesRef.current) {
+        try { cs.removePriceLine(pl); } catch { /* already removed */ }
+      }
+      priceLinesRef.current = [];
+
+      // Grid levels as price lines (AVG entry, DCA, TP, STOP)
+      if (data.grid_levels && data.grid_levels.length > 0) {
+        for (const gl of data.grid_levels) {
+          const isStop = gl.label.includes("STOP");
+          const isDCA = gl.label.startsWith("DCA");
+          const isTP = gl.label === "TP";
+          const isAvg = gl.label.startsWith("AVG");
+
+          let color = "#64748b";  // default slate
+          let lineStyle = 2;     // dashed
+          if (isStop) {
+            color = gl.filled ? "#dc2626" : "#dc262660";  // red if active, dim if not
+            lineStyle = 0;  // solid when active
+          } else if (isDCA) {
+            color = "#22c55e90";  // green semi-transparent
+          } else if (isTP) {
+            color = "#3b82f690";  // blue semi-transparent
+          } else if (isAvg) {
+            color = "#f59e0b";    // amber for avg entry
+            lineStyle = 0;       // solid
+          }
+
+          const pl = cs.createPriceLine({
+            price: gl.price,
+            color,
+            lineWidth: 1,
+            lineStyle,
+            axisLabelVisible: true,
+            title: gl.label,
+          });
+          priceLinesRef.current.push(pl);
+        }
+      }
+
       // Markers
       if (data.markers.length > 0) {
         const markers: SeriesMarker<Time>[] = data.markers.map((m) => ({
@@ -192,6 +239,8 @@ export function PMaxChart({ symbol, botRunning }: Props) {
           text: m.text,
         }));
         cs.setMarkers(markers);
+      } else {
+        cs.setMarkers([]);
       }
 
       setLoading(false);
@@ -210,7 +259,7 @@ export function PMaxChart({ symbol, botRunning }: Props) {
   }, [symbol, botRunning]);
 
   return (
-    <div className="bg-[#131d2a]/80 rounded-xl border border-slate-700/20 p-4">
+    <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] shadow-[0_0_20px_rgba(59,130,246,0.04)] p-4">
       <div className="flex items-center justify-between mb-2">
         <h2 className="text-sm font-semibold text-slate-300">{symbol} - 3m PMax</h2>
         <div className="flex items-center gap-3 text-[10px] text-slate-500">
@@ -222,6 +271,8 @@ export function PMaxChart({ symbol, botRunning }: Props) {
           </span>
           <span className="text-emerald-400">&#9650; DCA</span>
           <span className="text-blue-400">&#9679; TP</span>
+          <span className="text-amber-400">&#9632; REV</span>
+          <span className="text-red-600">&#9632; STOP</span>
         </div>
       </div>
       {loading && (

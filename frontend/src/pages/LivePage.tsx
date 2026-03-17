@@ -201,7 +201,7 @@ export default function LivePage() {
   );
 
   return (
-    <div className="min-h-screen bg-[#0b1217] text-slate-200 p-4 md:p-6">
+    <div className="min-h-screen bg-[#050a14] text-slate-200 p-4 md:p-6">
       <div className="max-w-7xl mx-auto space-y-5">
 
         {/* ── Header ── */}
@@ -237,7 +237,7 @@ export default function LivePage() {
 
         {/* ── API Keys Section ── */}
         {!keysValid && !liveRunning && (
-          <div className="bg-[#131d2a]/80 rounded-xl border border-slate-700/20 p-4 space-y-3">
+          <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4 space-y-3">
             <h2 className="text-sm font-semibold text-slate-300">Binance API Anahtarlari</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <label className="space-y-0.5">
@@ -245,14 +245,14 @@ export default function LivePage() {
                 <input type="password" value={apiKey}
                   onChange={(e) => setApiKey(e.target.value)}
                   placeholder="Binance Futures API Key"
-                  className="w-full bg-[#0b1217] border border-slate-700/30 rounded-lg px-3 py-1.5 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-emerald-500/50" />
+                  className="w-full bg-[#050a14] border border-blue-500/[0.08] rounded-lg px-3 py-1.5 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-emerald-500/50" />
               </label>
               <label className="space-y-0.5">
                 <span className="text-slate-500 text-[10px] uppercase">API Secret</span>
                 <input type="password" value={apiSecret}
                   onChange={(e) => setApiSecret(e.target.value)}
                   placeholder="Binance Futures API Secret"
-                  className="w-full bg-[#0b1217] border border-slate-700/30 rounded-lg px-3 py-1.5 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-emerald-500/50" />
+                  className="w-full bg-[#050a14] border border-blue-500/[0.08] rounded-lg px-3 py-1.5 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-emerald-500/50" />
               </label>
             </div>
             <div className="flex items-center gap-4">
@@ -276,7 +276,7 @@ export default function LivePage() {
 
         {/* ── Balance Display ── */}
         {keysValid && (
-          <div className="bg-[#131d2a]/80 rounded-xl border border-emerald-500/20 p-4">
+          <div className="bg-[#0a1628] rounded-xl border border-emerald-500/20 p-4">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-sm font-semibold text-emerald-400">Binance Futures Cuzdani</h2>
               {!liveRunning && (
@@ -303,7 +303,7 @@ export default function LivePage() {
 
         {/* ── Strategy Settings ── */}
         {keysValid && !liveRunning && (
-          <div className="bg-[#131d2a]/80 rounded-xl border border-slate-700/20 p-4 space-y-3">
+          <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4 space-y-3">
             <h2 className="text-sm font-semibold text-slate-300">Strateji Ayarlari</h2>
             <div className="flex items-center gap-4">
               <label className="space-y-0.5 flex flex-col">
@@ -312,13 +312,13 @@ export default function LivePage() {
                   <input type="checkbox"
                     checked={useAlternateSignals}
                     onChange={(e) => setUseAlternateSignals(e.target.checked)}
-                    className="w-4 h-4 accent-sky-500 bg-[#0b1217] border-slate-700/30 rounded" />
+                    className="w-4 h-4 accent-sky-500 bg-[#050a14] border-blue-500/[0.08] rounded" />
                   <span className="text-slate-400 text-[11px]">{useAlternateSignals ? "ON" : "OFF"}</span>
                   {useAlternateSignals && (
                     <input type="number" step="1" min="1"
                       value={alternateMultiplier}
                       onChange={(e) => setAlternateMultiplier(+e.target.value)}
-                      className="w-12 bg-[#0b1217] border border-slate-700/30 rounded px-1.5 py-0.5 text-xs font-mono text-slate-200" />
+                      className="w-12 bg-[#050a14] border border-blue-500/[0.08] rounded px-1.5 py-0.5 text-xs font-mono text-slate-200" />
                   )}
                 </div>
               </label>
@@ -328,7 +328,7 @@ export default function LivePage() {
 
         {/* ── Pair Selection & Config ── */}
         {keysValid && !liveRunning && (
-          <div className="bg-[#131d2a]/80 rounded-xl border border-slate-700/20 p-4 space-y-4">
+          <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4 space-y-4">
             <div className="flex items-center gap-3">
               <h2 className="text-sm font-semibold text-slate-300">Pair Secimi & Ayarlari</h2>
               <span className="text-[10px] text-slate-500">{selectedPairs.length}/20</span>
@@ -339,12 +339,12 @@ export default function LivePage() {
               <input type="text" value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Pair ara... (BTCUSDT)"
-                className="w-full bg-[#0b1217] border border-slate-700/30 rounded-lg px-3 py-1.5 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-sky-500/50" />
+                className="w-full bg-[#050a14] border border-blue-500/[0.08] rounded-lg px-3 py-1.5 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-sky-500/50" />
               {searchQuery && filteredSymbols.length > 0 && (
-                <div className="absolute z-10 top-full left-0 right-0 mt-1 bg-[#0b1217] border border-slate-700/30 rounded-lg max-h-48 overflow-y-auto">
+                <div className="absolute z-10 top-full left-0 right-0 mt-1 bg-[#050a14] border border-blue-500/[0.08] rounded-lg max-h-48 overflow-y-auto">
                   {filteredSymbols.slice(0, 20).map((s) => (
                     <button key={s} onClick={() => handleAddPair(s)}
-                      className="w-full text-left px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700/20 transition-colors">
+                      className="w-full text-left px-3 py-1.5 text-xs text-slate-300 hover:bg-blue-500/10 transition-colors">
                       {s}
                     </button>
                   ))}
@@ -357,7 +357,7 @@ export default function LivePage() {
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
-                    <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-slate-700/20">
+                    <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-blue-500/[0.08]">
                       <th className="text-left py-2 px-2">Pair</th>
                       <th className="text-center py-2 px-2">Margin (USDT)</th>
                       <th className="text-center py-2 px-2">Kaldirac</th>
@@ -369,19 +369,19 @@ export default function LivePage() {
                     {selectedPairs.map((sym) => {
                       const pc = pairConfigs[sym] || { margin: 50, leverage: 10 };
                       return (
-                        <tr key={sym} className="border-b border-slate-700/10">
+                        <tr key={sym} className="border-b border-blue-500/[0.06]">
                           <td className="py-2 px-2 font-semibold text-slate-200">{sym}</td>
                           <td className="py-2 px-2 text-center">
                             <input type="number" step="10" min="5"
                               value={pc.margin}
                               onChange={(e) => handlePairConfigChange(sym, "margin", +e.target.value)}
-                              className="w-20 bg-[#0b1217] border border-slate-700/30 rounded px-2 py-1 text-center text-xs font-mono text-slate-200" />
+                              className="w-20 bg-[#050a14] border border-blue-500/[0.08] rounded px-2 py-1 text-center text-xs font-mono text-slate-200" />
                           </td>
                           <td className="py-2 px-2 text-center">
                             <input type="number" step="1" min="1" max="125"
                               value={pc.leverage}
                               onChange={(e) => handlePairConfigChange(sym, "leverage", +e.target.value)}
-                              className="w-16 bg-[#0b1217] border border-slate-700/30 rounded px-2 py-1 text-center text-xs font-mono text-slate-200" />
+                              className="w-16 bg-[#050a14] border border-blue-500/[0.08] rounded px-2 py-1 text-center text-xs font-mono text-slate-200" />
                           </td>
                           <td className="py-2 px-2 text-center font-mono text-slate-400">
                             {formatNum(pc.margin * pc.leverage, 0)} USDT
@@ -404,7 +404,7 @@ export default function LivePage() {
 
         {/* ── Account Protection Settings ── */}
         {keysValid && (
-          <div className="bg-[#131d2a]/80 rounded-xl border border-amber-500/20 p-4 space-y-3">
+          <div className="bg-[#0a1628] rounded-xl border border-amber-500/20 p-4 space-y-3">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold text-amber-400">Hesap Koruma Ayarlari</h2>
               {liveRunning && (
@@ -425,7 +425,7 @@ export default function LivePage() {
                   <input type="number" min="5" max="80" step="5"
                     value={maxDrawdown}
                     onChange={(e) => setMaxDrawdown(+e.target.value)}
-                    className="w-16 bg-[#0b1217] border border-slate-700/30 rounded px-2 py-1 text-center text-xs font-mono text-amber-400" />
+                    className="w-16 bg-[#050a14] border border-blue-500/[0.08] rounded px-2 py-1 text-center text-xs font-mono text-amber-400" />
                 </div>
                 <span className="text-[9px] text-slate-500">Bakiye %{maxDrawdown} duserse yeni islem durdurulur</span>
               </label>
@@ -439,7 +439,7 @@ export default function LivePage() {
                   <input type="number" min="10" max="100" step="5"
                     value={maxMarginPct}
                     onChange={(e) => setMaxMarginPct(+e.target.value)}
-                    className="w-16 bg-[#0b1217] border border-slate-700/30 rounded px-2 py-1 text-center text-xs font-mono text-amber-400" />
+                    className="w-16 bg-[#050a14] border border-blue-500/[0.08] rounded px-2 py-1 text-center text-xs font-mono text-amber-400" />
                 </div>
                 <span className="text-[9px] text-slate-500">Tum pozisyonlarin toplam margin'i bakiyenin %{maxMarginPct}'ini asamaz</span>
               </label>
@@ -453,7 +453,7 @@ export default function LivePage() {
                   <input type="number" min="1" max="20" step="1"
                     value={maxPositions}
                     onChange={(e) => setMaxPositions(+e.target.value)}
-                    className="w-16 bg-[#0b1217] border border-slate-700/30 rounded px-2 py-1 text-center text-xs font-mono text-amber-400" />
+                    className="w-16 bg-[#050a14] border border-blue-500/[0.08] rounded px-2 py-1 text-center text-xs font-mono text-amber-400" />
                 </div>
                 <span className="text-[9px] text-slate-500">Ayni anda en fazla {maxPositions} pozisyon acik olabilir</span>
               </label>
@@ -476,7 +476,7 @@ export default function LivePage() {
             {/* Live Protection Stats */}
             {liveRunning && stats && (
               <div className="grid grid-cols-3 gap-2 mt-2">
-                <div className="bg-[#0b1217]/60 rounded-lg px-3 py-2 text-center">
+                <div className="bg-[#050a14]/60 rounded-lg px-3 py-2 text-center">
                   <div className="text-[9px] text-slate-500 uppercase">Drawdown</div>
                   <div className={`text-sm font-mono font-semibold ${
                     stats.drawdown_pct > maxDrawdown * 0.7 ? "text-red-400" : "text-slate-200"
@@ -484,7 +484,7 @@ export default function LivePage() {
                     %{formatNum(stats.drawdown_pct, 1)} <span className="text-[9px] text-slate-500">/ %{maxDrawdown}</span>
                   </div>
                 </div>
-                <div className="bg-[#0b1217]/60 rounded-lg px-3 py-2 text-center">
+                <div className="bg-[#050a14]/60 rounded-lg px-3 py-2 text-center">
                   <div className="text-[9px] text-slate-500 uppercase">Acik Pozisyon</div>
                   <div className={`text-sm font-mono font-semibold ${
                     stats.open_positions >= maxPositions ? "text-red-400" : "text-slate-200"
@@ -492,7 +492,7 @@ export default function LivePage() {
                     {stats.open_positions} <span className="text-[9px] text-slate-500">/ {maxPositions}</span>
                   </div>
                 </div>
-                <div className="bg-[#0b1217]/60 rounded-lg px-3 py-2 text-center">
+                <div className="bg-[#050a14]/60 rounded-lg px-3 py-2 text-center">
                   <div className="text-[9px] text-slate-500 uppercase">Sync Uyarilari</div>
                   <div className={`text-sm font-mono font-semibold ${
                     (stats.sync_warnings?.length || 0) > 0 ? "text-yellow-400" : "text-slate-200"
@@ -507,12 +507,12 @@ export default function LivePage() {
 
         {/* ── Exchange Positions (shown on start, before signals) ── */}
         {liveRunning && exchangePositions.length > 0 && !status?.positions?.length && (
-          <div className="bg-[#131d2a]/80 rounded-xl border border-yellow-500/20 p-4">
+          <div className="bg-[#0a1628] rounded-xl border border-yellow-500/20 p-4">
             <h2 className="text-sm font-semibold text-yellow-400 mb-3">Binance Acik Pozisyonlar (Onceden Mevcut)</h2>
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead>
-                  <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-slate-700/20">
+                  <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-blue-500/[0.08]">
                     <th className="text-left py-2 px-2">Symbol</th>
                     <th className="text-center py-2">Side</th>
                     <th className="text-right py-2 px-2">Amount</th>
@@ -523,7 +523,7 @@ export default function LivePage() {
                 </thead>
                 <tbody>
                   {exchangePositions.map((p, i) => (
-                    <tr key={i} className="border-b border-slate-700/10">
+                    <tr key={i} className="border-b border-blue-500/[0.06]">
                       <td className="py-1.5 px-2 font-semibold">{p.symbol}</td>
                       <td className="py-1.5 text-center">
                         <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
@@ -576,12 +576,12 @@ export default function LivePage() {
               {Object.entries(status.pair_summaries).map(([sym, pair]: [string, any]) => (
                 <div key={sym} className={`rounded-xl border p-3 ${
                   pair.pair_state === "OBSERVING"
-                    ? "bg-[#131d2a]/80 border-yellow-500/20"
+                    ? "bg-[#0a1628] border-yellow-500/20"
                     : pair.side === "LONG"
-                      ? "bg-[#131d2a]/80 border-emerald-500/20"
+                      ? "bg-[#0a1628] border-emerald-500/20"
                       : pair.side === "SHORT"
-                        ? "bg-[#131d2a]/80 border-red-500/20"
-                        : "bg-[#131d2a]/80 border-slate-700/20"
+                        ? "bg-[#0a1628] border-red-500/20"
+                        : "bg-[#0a1628] border-blue-500/[0.08]"
                 }`}>
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-sm font-semibold text-slate-200">{sym}</span>
@@ -621,7 +621,7 @@ export default function LivePage() {
 
         {/* ── Open Positions ── */}
         {liveRunning && status?.positions && status.positions.length > 0 && (
-          <div className="bg-[#131d2a]/80 rounded-xl border border-emerald-500/20 p-4">
+          <div className="bg-[#0a1628] rounded-xl border border-emerald-500/20 p-4">
             <h2 className="text-sm font-semibold text-emerald-400 mb-3">Acik Pozisyonlar (LIVE)</h2>
             <PositionTable positions={status.positions} />
           </div>
@@ -629,7 +629,7 @@ export default function LivePage() {
 
         {/* ── Trade History ── */}
         {liveRunning && (
-          <div className="bg-[#131d2a]/80 rounded-xl border border-slate-700/20 p-4">
+          <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4">
             <h2 className="text-sm font-semibold text-slate-300 mb-3">Islem Gecmisi</h2>
             <TradeTable trades={status?.trade_log || []} />
           </div>
@@ -637,12 +637,12 @@ export default function LivePage() {
 
         {/* ── Signal Log ── */}
         {liveRunning && status?.signal_log && status.signal_log.length > 0 && (
-          <div className="bg-[#131d2a]/80 rounded-xl border border-slate-700/20 p-4">
+          <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4">
             <h2 className="text-sm font-semibold text-slate-300 mb-3">Sinyal Gecmisi</h2>
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead>
-                  <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-slate-700/20">
+                  <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-blue-500/[0.08]">
                     <th className="text-left py-2 px-2">Zaman</th>
                     <th className="text-left py-2 px-2">Symbol</th>
                     <th className="text-center py-2">Side</th>
@@ -653,7 +653,7 @@ export default function LivePage() {
                 </thead>
                 <tbody>
                   {status.signal_log.map((s: any, i: number) => (
-                    <tr key={i} className="border-b border-slate-700/10">
+                    <tr key={i} className="border-b border-blue-500/[0.06]">
                       <td className="py-1.5 px-2 text-slate-400">{s.time}</td>
                       <td className="py-1.5 px-2 font-semibold">{s.symbol}</td>
                       <td className="py-1.5 text-center">
@@ -674,11 +674,11 @@ export default function LivePage() {
 
         {/* ── Pair Configs (running mode) ── */}
         {liveRunning && status?.pair_configs && (
-          <div className="bg-[#131d2a]/80 rounded-xl border border-slate-700/20 p-4">
+          <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4">
             <h2 className="text-sm font-semibold text-slate-300 mb-3">Pair Ayarlari</h2>
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 text-xs">
               {Object.entries(status.pair_configs).map(([sym, pc]: [string, any]) => (
-                <div key={sym} className="bg-[#0b1217]/60 rounded-lg px-3 py-2 flex items-center justify-between">
+                <div key={sym} className="bg-[#050a14]/60 rounded-lg px-3 py-2 flex items-center justify-between">
                   <span className="font-semibold text-slate-200">{sym}</span>
                   <span className="text-slate-400 font-mono">{pc.margin} USDT / {pc.leverage}x</span>
                 </div>

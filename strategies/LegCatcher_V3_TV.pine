@@ -1,0 +1,376 @@
+// This Pine Script™ strategy is subject to the terms of the Mozilla Public License 2.0
+// © emrehaskilic — Leg Catcher V3.1: Market Structure + Chop Filter
+// Designed for 3-minute chart, crypto futures (BTCUSDT, ETHUSDT etc.)
+//
+// V3 sonucu: Trend yakalandı (+1000 Şubat) ama choppy piyasada kanıyor (-698 net)
+// V3.1 eklenenler:
+//   - ADX chop filter → yatay piyasada trade YAPMA
+//   - Daha geniş pivot (7/7) → daha az gürültü, daha temiz yapı
+//   - Pivot-based trailing → stop her yeni pivot ile güncellenir
+//   - Cooldown after loss → kayıp sonrası bekleme süresi
+
+//@version=5
+strategy("Leg Catcher V3.1 — Structure + Chop Filter", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.02, slippage=1, initial_capital=10000, currency=currency.USD, calc_on_every_tick=false)
+
+// ══════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════
+
+grp_struct  = "── Structure Detection ──"
+pivotLeft       = input.int(7, "Pivot Left Bars", minval=2, maxval=20, group=grp_struct, tooltip="Daha büyük = daha az gürültü, daha geç tespit")
+pivotRight      = input.int(7, "Pivot Right Bars", minval=2, maxval=20, group=grp_struct, tooltip="Onay gecikmesi (7 bar = 21 dk)")
+structBreakConf = input.bool(true, "Require Close Beyond Pivot", group=grp_struct)
+
+grp_chop    = "── Chop Filter (ADX) ──"
+useAdxFilter    = input.bool(true, "Enable ADX Filter", group=grp_chop, tooltip="ADX düşükken trade yapma")
+adxLen          = input.int(14, "ADX Length", minval=7, maxval=30, group=grp_chop)
+adxThreshold    = input.float(20.0, "ADX Min Threshold", minval=10, maxval=40, step=1, group=grp_chop, tooltip="ADX bu seviyenin altındaysa piyasa yatay = trade yok")
+useChopIndex    = input.bool(true, "Enable Choppiness Index", group=grp_chop, tooltip="CI yüksekken trade yapma")
+chopLen         = input.int(14, "Choppiness Length", minval=7, maxval=30, group=grp_chop)
+chopThreshold   = input.float(55.0, "Chop Max Threshold", minval=40, maxval=70, step=1, group=grp_chop, tooltip="CI bu seviyenin üstündeyse piyasa choppy = trade yok")
+
+grp_exit    = "── Risk & Exit ──"
+atrLen          = input.int(14, "ATR Length", minval=5, maxval=50, group=grp_exit)
+slMode          = input.string("Pivot", "Stop Loss Mode", options=["Pivot", "ATR", "Both"], group=grp_exit)
+slAtrMult       = input.float(2.0, "SL ATR Multiplier", minval=1.0, step=0.1, group=grp_exit)
+slPivotPad      = input.float(0.15, "SL Pivot Padding %", minval=0.0, maxval=0.5, step=0.05, group=grp_exit)
+useTP           = input.bool(false, "Use Take Profit", group=grp_exit)
+tpAtrMult       = input.float(4.0, "TP ATR Multiplier", minval=2.0, step=0.5, group=grp_exit)
+useTrailing     = input.bool(true, "Use Trailing Stop", group=grp_exit)
+trailActivation = input.float(1.5, "Trail Activation (ATR x)", minval=0.5, step=0.1, group=grp_exit)
+trailOffset     = input.float(1.0, "Trail Offset (ATR x)", minval=0.3, step=0.1, group=grp_exit)
+usePivotTrail   = input.bool(true, "Update SL on New Pivot", group=grp_exit, tooltip="Yeni pivot oluşunca stop'u güncelle")
+
+grp_filter  = "── Other Filters ──"
+useAtrFilter    = input.bool(true, "ATR Filter (Skip Low Vol)", group=grp_filter)
+atrFilterLen    = input.int(50, "ATR Filter MA Length", minval=20, maxval=100, group=grp_filter)
+atrFilterMult   = input.float(0.6, "ATR Min Threshold", minval=0.3, step=0.1, group=grp_filter)
+
+grp_risk    = "── Risk Management ──"
+dailyMaxLoss    = input.float(2.0, "Daily Max Loss %", minval=0.5, maxval=5.0, step=0.5, group=grp_risk)
+maxTradesDay    = input.int(6, "Max Trades / Day", minval=1, maxval=20, group=grp_risk)
+cooldownBars    = input.int(10, "Cooldown After Loss (bars)", minval=0, maxval=50, group=grp_risk, tooltip="Kayıp sonrası kaç bar bekle (10 bar = 30 dk)")
+
+grp_visual  = "── Visuals ──"
+showPivots      = input.bool(true, "Show Pivot Points", group=grp_visual)
+showStructure   = input.bool(true, "Show Structure Lines", group=grp_visual)
+showSL          = input.bool(true, "Show Stop Loss Level", group=grp_visual)
+
+// ══════════════════════════════════════════════════════════════
+// CORE CALCULATIONS
+// ══════════════════════════════════════════════════════════════
+
+atr = ta.atr(atrLen)
+atrMA = ta.sma(atr, atrFilterLen)
+
+// ══════════════════════════════════════════════════════════════
+// ADX CALCULATION (Trend Strength)
+// ══════════════════════════════════════════════════════════════
+
+// ADX - measures trend strength regardless of direction
+// ADX > 20-25 = trending, ADX < 20 = choppy/ranging
+dirmov(len) =>
+    up = ta.change(high)
+    down = -ta.change(low)
+    plusDM = na(up) ? na : (up > down and up > 0 ? up : 0)
+    minusDM = na(down) ? na : (down > up and down > 0 ? down : 0)
+    truerange = ta.rma(ta.tr, len)
+    plus = fixnan(100 * ta.rma(plusDM, len) / truerange)
+    minus = fixnan(100 * ta.rma(minusDM, len) / truerange)
+    [plus, minus]
+
+adx(dilen, adilen) =>
+    [plus, minus] = dirmov(dilen)
+    sum = plus + minus
+    adxVal = 100 * ta.rma(math.abs(plus - minus) / (sum == 0 ? 1 : sum), adilen)
+    adxVal
+
+adxValue = adx(adxLen, adxLen)
+
+// ══════════════════════════════════════════════════════════════
+// CHOPPINESS INDEX (Market Chaos Measure)
+// ══════════════════════════════════════════════════════════════
+
+// CI = 100 * LOG10(SUM(ATR, N) / (Highest - Lowest)) / LOG10(N)
+// High CI (>61.8) = choppy, Low CI (<38.2) = trending
+chopATR = ta.atr(1)
+chopSum = math.sum(chopATR, chopLen)
+chopHigh = ta.highest(high, chopLen)
+chopLow = ta.lowest(low, chopLen)
+chopRange = chopHigh - chopLow
+chopIndex = chopRange > 0 ? 100 * math.log10(chopSum / chopRange) / math.log10(chopLen) : 50
+
+// ══════════════════════════════════════════════════════════════
+// PIVOT DETECTION
+// ══════════════════════════════════════════════════════════════
+
+pvtHigh = ta.pivothigh(high, pivotLeft, pivotRight)
+pvtLow  = ta.pivotlow(low, pivotLeft, pivotRight)
+
+var float lastPH1 = na
+var float lastPH2 = na
+var float lastPL1 = na
+var float lastPL2 = na
+
+var int lastPH1_bar = na
+var int lastPL1_bar = na
+
+if not na(pvtHigh)
+    lastPH2 := lastPH1
+    lastPH1 := pvtHigh
+    lastPH1_bar := bar_index - pivotRight
+
+if not na(pvtLow)
+    lastPL2 := lastPL1
+    lastPL1 := pvtLow
+    lastPL1_bar := bar_index - pivotRight
+
+// ══════════════════════════════════════════════════════════════
+// MARKET STRUCTURE
+// ══════════════════════════════════════════════════════════════
+
+higherHigh = not na(lastPH1) and not na(lastPH2) and lastPH1 > lastPH2
+higherLow  = not na(lastPL1) and not na(lastPL2) and lastPL1 > lastPL2
+lowerHigh  = not na(lastPH1) and not na(lastPH2) and lastPH1 < lastPH2
+lowerLow   = not na(lastPL1) and not na(lastPL2) and lastPL1 < lastPL2
+
+var int trend = 0
+
+bullBreak = false
+bearBreak = false
+
+if structBreakConf
+    bullBreak := trend <= 0 and not na(lastPH1) and close > lastPH1 and higherLow
+    bearBreak := trend >= 0 and not na(lastPL1) and close < lastPL1 and lowerHigh
+else
+    bullBreak := trend <= 0 and higherHigh and higherLow
+    bearBreak := trend >= 0 and lowerHigh and lowerLow
+
+if bullBreak
+    trend := 1
+if bearBreak
+    trend := -1
+
+// ══════════════════════════════════════════════════════════════
+// STOP LOSS
+// ══════════════════════════════════════════════════════════════
+
+var float currentSL = na
+
+calcSL_long() =>
+    pivotSL = not na(lastPL1) ? lastPL1 * (1 - slPivotPad / 100) : close - atr * slAtrMult
+    atrSL = close - atr * slAtrMult
+    result = switch slMode
+        "Pivot" => pivotSL
+        "ATR" => atrSL
+        "Both" => math.max(pivotSL, atrSL)
+    result
+
+calcSL_short() =>
+    pivotSL = not na(lastPH1) ? lastPH1 * (1 + slPivotPad / 100) : close + atr * slAtrMult
+    atrSL = close + atr * slAtrMult
+    result = switch slMode
+        "Pivot" => pivotSL
+        "ATR" => atrSL
+        "Both" => math.min(pivotSL, atrSL)
+    result
+
+// Update SL when new pivot forms while in position
+if usePivotTrail and strategy.position_size > 0 and not na(pvtLow)
+    newSL = lastPL1 * (1 - slPivotPad / 100)
+    if newSL > nz(currentSL)
+        currentSL := newSL
+        strategy.exit("Exit L", "Long", stop=currentSL)
+
+if usePivotTrail and strategy.position_size < 0 and not na(pvtHigh)
+    newSL = lastPH1 * (1 + slPivotPad / 100)
+    if newSL < nz(currentSL) or na(currentSL)
+        currentSL := newSL
+        strategy.exit("Exit S", "Short", stop=currentSL)
+
+// ══════════════════════════════════════════════════════════════
+// FILTERS
+// ══════════════════════════════════════════════════════════════
+
+// ATR filter
+atrOk = useAtrFilter ? atr > atrMA * atrFilterMult : true
+
+// ADX filter — THE KEY ADDITION
+adxOk = useAdxFilter ? adxValue >= adxThreshold : true
+
+// Choppiness filter
+chopOk = useChopIndex ? chopIndex <= chopThreshold : true
+
+// Combined trend quality
+trendQualityOk = adxOk and chopOk
+
+// Daily loss guard
+var float dayStartEquity = strategy.equity
+var int lastDay = dayofmonth
+if dayofmonth != lastDay
+    dayStartEquity := strategy.equity
+    lastDay := dayofmonth
+
+dayPnLPct = ((strategy.equity - dayStartEquity) / dayStartEquity) * 100
+dailyLossOk = dayPnLPct > -dailyMaxLoss
+
+// Trade counter
+var int tradesToday = 0
+if dayofmonth != lastDay[1]
+    tradesToday := 0
+tradeCountOk = tradesToday < maxTradesDay
+
+// Cooldown after losing trade
+var int barsSinceLoss = 100
+barsSinceLoss += 1
+
+// Detect losing exit
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    if strategy.equity < strategy.equity[1]
+        barsSinceLoss := 0
+
+cooldownOk = barsSinceLoss >= cooldownBars
+
+// All filters
+filtersOk = atrOk and trendQualityOk and dailyLossOk and tradeCountOk and cooldownOk
+
+// ══════════════════════════════════════════════════════════════
+// ENTRY SIGNALS
+// ══════════════════════════════════════════════════════════════
+
+longEntry  = trend == 1 and trend[1] != 1 and filtersOk
+shortEntry = trend == -1 and trend[1] != -1 and filtersOk
+
+longFlip   = trend == 1 and strategy.position_size < 0 and filtersOk
+shortFlip  = trend == -1 and strategy.position_size > 0 and filtersOk
+
+longSignal  = longEntry or longFlip
+shortSignal = shortEntry or shortFlip
+
+// ══════════════════════════════════════════════════════════════
+// EXECUTE TRADES
+// ══════════════════════════════════════════════════════════════
+
+var float entryPrice = na
+
+if longSignal
+    entryPrice := close
+    currentSL := calcSL_long()
+    tradesToday += 1
+    strategy.entry("Long", strategy.long)
+    if useTP
+        strategy.exit("Exit L", "Long", stop=currentSL, limit=close + atr * tpAtrMult)
+    else
+        strategy.exit("Exit L", "Long", stop=currentSL)
+
+if shortSignal
+    entryPrice := close
+    currentSL := calcSL_short()
+    tradesToday += 1
+    strategy.entry("Short", strategy.short)
+    if useTP
+        strategy.exit("Exit S", "Short", stop=currentSL, limit=close - atr * tpAtrMult)
+    else
+        strategy.exit("Exit S", "Short", stop=currentSL)
+
+// ══════════════════════════════════════════════════════════════
+// TRAILING STOP
+// ══════════════════════════════════════════════════════════════
+
+if useTrailing and strategy.position_size > 0 and not na(entryPrice)
+    priceGain = high - entryPrice
+    if priceGain >= atr * trailActivation
+        trailPrice = high - atr * trailOffset
+        trailPrice := math.max(trailPrice, nz(currentSL))
+        currentSL := trailPrice
+        strategy.exit("Trail L", "Long", stop=trailPrice)
+
+if useTrailing and strategy.position_size < 0 and not na(entryPrice)
+    priceGain = entryPrice - low
+    if priceGain >= atr * trailActivation
+        trailPrice = low + atr * trailOffset
+        trailPrice := math.min(trailPrice, nz(currentSL, trailPrice))
+        currentSL := trailPrice
+        strategy.exit("Trail S", "Short", stop=trailPrice)
+
+// ══════════════════════════════════════════════════════════════
+// PLOTS
+// ══════════════════════════════════════════════════════════════
+
+// Pivot Points
+plotshape(showPivots and not na(pvtHigh), "Pivot High", shape.circle, location.abovebar, color.new(color.red, 20), size=size.tiny, offset=-pivotRight)
+plotshape(showPivots and not na(pvtLow), "Pivot Low", shape.circle, location.belowbar, color.new(color.green, 20), size=size.tiny, offset=-pivotRight)
+
+// Entry Signals
+plotshape(longSignal, "Long", shape.triangleup, location.belowbar, color.new(#00E676, 0), size=size.normal, text="LONG")
+plotshape(shortSignal, "Short", shape.triangledown, location.abovebar, color.new(#FF1744, 0), size=size.normal, text="SHORT")
+
+// Trend Background
+trendColor = trend == 1 ? color.new(color.green, 93) : trend == -1 ? color.new(color.red, 93) : na
+bgcolor(trendColor, title="Trend")
+
+// Structure Lines
+plot(showStructure and not na(lastPH1) ? lastPH1 : na, "Last PH", color.new(color.red, 50), linewidth=1, style=plot.style_linebr)
+plot(showStructure and not na(lastPL1) ? lastPL1 : na, "Last PL", color.new(color.green, 50), linewidth=1, style=plot.style_linebr)
+
+// Stop Loss
+plot(showSL and strategy.position_size != 0 ? currentSL : na, "Stop Loss", color.new(color.orange, 30), linewidth=2, style=plot.style_linebr)
+
+// CHOP ZONE — yellow background when market is choppy (NO TRADE zone)
+isChoppy = (useAdxFilter and adxValue < adxThreshold) or (useChopIndex and chopIndex > chopThreshold)
+bgcolor(isChoppy ? color.new(color.yellow, 92) : na, title="Chop Zone")
+
+// ATR filter
+bgcolor(useAtrFilter and not atrOk ? color.new(color.gray, 92) : na, title="Low Volatility")
+
+// Daily loss lock
+bgcolor(not dailyLossOk ? color.new(color.red, 90) : na, title="Daily Loss Lock")
+
+// Loss cooldown
+bgcolor(not cooldownOk ? color.new(color.blue, 95) : na, title="Loss Cooldown")
+
+// ══════════════════════════════════════════════════════════════
+// INFO TABLE
+// ══════════════════════════════════════════════════════════════
+
+var table infoTable = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80), border_width=1)
+
+trendStr = trend == 1 ? "UPTREND" : trend == -1 ? "DOWNTREND" : "NEUTRAL"
+trendClr = trend == 1 ? color.green : trend == -1 ? color.red : color.gray
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "LEG CATCHER V3.1", text_color=color.yellow, text_size=size.small)
+    table.cell(infoTable, 1, 0, "Structure+Chop", text_color=color.yellow, text_size=size.small)
+
+    table.cell(infoTable, 0, 1, "Trend", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 1, trendStr, text_color=trendClr, text_size=size.small)
+
+    table.cell(infoTable, 0, 2, "ADX", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 2, str.tostring(adxValue, "#.#") + (adxOk ? " TREND" : " CHOP"), text_color=adxOk ? color.green : color.red, text_size=size.small)
+
+    table.cell(infoTable, 0, 3, "Chop Index", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 3, str.tostring(chopIndex, "#.#") + (chopOk ? " OK" : " CHOPPY"), text_color=chopOk ? color.green : color.red, text_size=size.small)
+
+    table.cell(infoTable, 0, 4, "Last PH", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 4, not na(lastPH1) ? str.tostring(lastPH1, "#.#") : "—", text_color=color.red, text_size=size.small)
+
+    table.cell(infoTable, 0, 5, "Last PL", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 5, not na(lastPL1) ? str.tostring(lastPL1, "#.#") : "—", text_color=color.green, text_size=size.small)
+
+    table.cell(infoTable, 0, 6, "HH/HL", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 6, (higherHigh ? "HH " : "— ") + (higherLow ? "HL" : "—"), text_color=higherHigh and higherLow ? color.green : color.gray, text_size=size.small)
+
+    table.cell(infoTable, 0, 7, "LH/LL", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 7, (lowerHigh ? "LH " : "— ") + (lowerLow ? "LL" : "—"), text_color=lowerHigh and lowerLow ? color.red : color.gray, text_size=size.small)
+
+    table.cell(infoTable, 0, 8, "ATR", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 8, str.tostring(atr, "#.#"), text_color=atrOk ? color.green : color.red, text_size=size.small)
+
+    table.cell(infoTable, 0, 9, "Stop Loss", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 9, not na(currentSL) and strategy.position_size != 0 ? str.tostring(currentSL, "#.#") : "—", text_color=color.orange, text_size=size.small)
+
+    table.cell(infoTable, 0, 10, "Day PnL", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 10, str.tostring(dayPnLPct, "#.##") + "%", text_color=dayPnLPct >= 0 ? color.green : color.red, text_size=size.small)
+
+    table.cell(infoTable, 0, 11, "Trades", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 11, str.tostring(tradesToday) + "/" + str.tostring(maxTradesDay), text_color=tradeCountOk ? color.green : color.orange, text_size=size.small)

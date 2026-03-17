@@ -4,10 +4,12 @@ import './index.css'
 import App from './App.tsx'
 import BacktestPage from './pages/BacktestPage.tsx'
 import LivePage from './pages/LivePage.tsx'
+import PipelinePage from './pages/PipelinePage.tsx'
 import { Navbar } from './components/Navbar.tsx'
+import type { PageId } from './components/Navbar.tsx'
 
 function Root() {
-  const [page, setPage] = useState<"dashboard" | "backtest" | "live">("dashboard");
+  const [page, setPage] = useState<PageId>("dashboard");
 
   return (
     <>
@@ -17,6 +19,9 @@ function Root() {
       </div>
       <div style={{ display: page === "backtest" ? "block" : "none" }}>
         <BacktestPage />
+      </div>
+      <div style={{ display: page === "pipeline" ? "block" : "none" }}>
+        <PipelinePage />
       </div>
       <div style={{ display: page === "live" ? "block" : "none" }}>
         <LivePage />

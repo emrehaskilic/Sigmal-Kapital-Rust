@@ -37,3 +37,9 @@ data/*.parquet
 
 # Logs
 *.log
+
+# Rust build artifacts
+rust_engine/target/
+rust_engine/src/src/
+data/*.csv
+results/

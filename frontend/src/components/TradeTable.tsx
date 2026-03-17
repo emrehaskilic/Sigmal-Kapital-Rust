@@ -18,7 +18,7 @@ export function TradeTable({ trades }: Props) {
     <div className="overflow-x-auto">
       <table className="w-full text-xs">
         <thead>
-          <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-slate-700/20">
+          <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-blue-500/[0.08]">
             <th className="text-left py-2 px-2">#</th>
             <th className="text-left py-2 px-2">Symbol</th>
             <th className="text-center py-2">Side</th>
@@ -34,7 +34,7 @@ export function TradeTable({ trades }: Props) {
           {trades.map((t) => (
             <tr
               key={t.id}
-              className="border-b border-slate-700/10 hover:bg-slate-700/10 transition-colors"
+              className="border-b border-blue-500/[0.06] hover:bg-blue-500/10 transition-colors"
             >
               <td className="py-1.5 px-2 text-slate-500">{t.id}</td>
               <td className="py-1.5 px-2 font-semibold text-slate-200">{t.symbol}</td>

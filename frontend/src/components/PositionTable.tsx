@@ -18,7 +18,7 @@ export function PositionTable({ positions }: Props) {
     <div className="overflow-x-auto">
       <table className="w-full text-xs">
         <thead>
-          <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-slate-700/20">
+          <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-blue-500/[0.08]">
             <th className="text-left py-2 px-2">Symbol</th>
             <th className="text-center py-2">Side</th>
             <th className="text-right py-2 px-2">Entry</th>
@@ -39,7 +39,7 @@ export function PositionTable({ positions }: Props) {
           {positions.map((p) => (
             <tr
               key={p.symbol}
-              className="border-b border-slate-700/10 hover:bg-slate-700/10 transition-colors"
+              className="border-b border-blue-500/[0.06] hover:bg-blue-500/10 transition-colors"
             >
               <td className="py-2 px-2 font-semibold text-slate-200">{p.symbol}</td>
               <td className="py-2 text-center">

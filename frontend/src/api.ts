@@ -1,4 +1,5 @@
 const BASE = "http://localhost:8000";
+const OPTIMIZER_BASE = "http://localhost:8055";
 
 export async function fetchSymbols(): Promise<{ symbols: string[]; count: number }> {
   const res = await fetch(`${BASE}/api/symbols`);
@@ -142,5 +143,58 @@ export async function liveGetProtection() {
 
 export async function liveResetCircuitBreaker() {
   const res = await fetch(`${BASE}/api/live/reset-circuit-breaker`, { method: "POST" });
+  return res.json();
+}
+
+// ── Pipeline V2 API (Optimizer Backend — port 8055) ──
+
+export async function v2Init(symbol: string, timeframe: string = "3m", n_trials: number = 1000) {
+  const res = await fetch(`${OPTIMIZER_BASE}/api/v2/init`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ symbol, timeframe, n_trials }),
+  });
+  return res.json();
+}
+
+export async function v2GetState() {
+  const res = await fetch(`${OPTIMIZER_BASE}/api/v2/state`);
+  return res.json();
+}
+
+export async function v2StepStart(step: string) {
+  const res = await fetch(`${OPTIMIZER_BASE}/api/v2/step/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ step }),
+  });
+  return res.json();
+}
+
+export async function v2StepSelect(step: string, selected_index: number) {
+  const res = await fetch(`${OPTIMIZER_BASE}/api/v2/step/select`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ step, selected_index }),
+  });
+  return res.json();
+}
+
+export async function v2UpdateSettings(settings: { timeframe?: string; n_trials?: number }) {
+  const res = await fetch(`${OPTIMIZER_BASE}/api/v2/settings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  });
+  return res.json();
+}
+
+export async function v2Stop() {
+  const res = await fetch(`${OPTIMIZER_BASE}/api/v2/stop`, { method: "POST" });
+  return res.json();
+}
+
+export async function v2Reset() {
+  const res = await fetch(`${OPTIMIZER_BASE}/api/v2/reset`, { method: "POST" });
   return res.json();
 }

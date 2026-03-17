@@ -135,6 +135,10 @@ class LiveExecutor:
         hard_stop_cfg = trading.get("hard_stop", {})
         self._hard_stop_enabled = hard_stop_cfg.get("enabled", False)
 
+        # Percentage-based hard stop config
+        pct_stop_cfg = trading.get("pct_hard_stop", {})
+        self._pct_stop_enabled = pct_stop_cfg.get("enabled", False)
+
         # ── Account Protection ──
         protection = config.get("protection", {})
         self._max_drawdown_pct: float = protection.get("max_drawdown_pct", 10.0)
@@ -757,6 +761,22 @@ class LiveExecutor:
                     trades = self._close_position(key, dyn_price)
                     for t in trades:
                         t.exit_reason = "DYN_SL"
+                    completed.extend(trades)
+                    continue
+
+            # 0a2. Percentage hard stop check (after DCA full)
+            if self._pct_stop_enabled and candle_close > 0:
+                pct_hit, pct_price = risk_mgr.check_pct_hard_stop(
+                    pos, candle_close,
+                )
+                if pct_hit:
+                    logger.warning(
+                        "[PCT_STOP] %s %s hit @ %.4f (close=%.4f)",
+                        pos.symbol, pos.side, pct_price, candle_close,
+                    )
+                    trades = self._close_position(key, pct_price)
+                    for t in trades:
+                        t.exit_reason = "PCT_STOP"
                     completed.extend(trades)
                     continue
 

@@ -20,7 +20,7 @@ export function PairGrid({ pairs }: Props) {
         return (
           <div
             key={sym}
-            className={`bg-[#131d2a]/80 rounded-xl border border-slate-700/20 border-l-4 ${borderColor} p-3`}
+            className={`bg-[#0a1628] rounded-xl border border-blue-500/[0.08] border-l-4 ${borderColor} p-3`}
           >
             <div className="flex items-center justify-between mb-2">
               <span className="font-semibold text-slate-200 text-sm">{sym}</span>
@@ -35,7 +35,7 @@ export function PairGrid({ pairs }: Props) {
                   {p.side} AKTIF
                 </span>
               ) : (
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-700/30 text-slate-400">
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/10 text-slate-400">
                   BEKLIYOR
                 </span>
               )}

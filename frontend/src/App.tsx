@@ -97,7 +97,7 @@ export default function App() {
   const fees = status?.fees;
 
   return (
-    <div className="min-h-screen bg-[#0b1217] text-slate-200 p-4 md:p-6">
+    <div className="min-h-screen bg-[#050a14] text-slate-200 p-4 md:p-6">
       <div className="max-w-7xl mx-auto space-y-5">
 
         {/* ── Header ── */}
@@ -124,7 +124,7 @@ export default function App() {
         </div>
 
         {/* ── Pair Selection ── */}
-        <div className="bg-[#131d2a]/80 rounded-xl border border-slate-700/20 p-4">
+        <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4">
           <div className="flex items-center gap-3 mb-3">
             <h2 className="text-sm font-semibold text-slate-300">Pair Secimi</h2>
             <span className="text-[10px] text-slate-500">{activeSymbols.length}/50</span>
@@ -134,12 +134,12 @@ export default function App() {
               <input type="text" value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Pair ara... (BTCUSDT)"
-                className="w-full bg-[#0b1217] border border-slate-700/30 rounded-lg px-3 py-1.5 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-sky-500/50" />
+                className="w-full bg-[#050a14] border border-blue-500/[0.08] rounded-lg px-3 py-1.5 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-sky-500/50" />
               {searchQuery && filteredSymbols.length > 0 && (
-                <div className="absolute z-10 top-full left-0 right-0 mt-1 bg-[#0b1217] border border-slate-700/30 rounded-lg max-h-48 overflow-y-auto">
+                <div className="absolute z-10 top-full left-0 right-0 mt-1 bg-[#050a14] border border-blue-500/[0.08] rounded-lg max-h-48 overflow-y-auto">
                   {filteredSymbols.slice(0, 20).map((s) => (
                     <button key={s} onClick={() => handleAddPair(s)}
-                      className="w-full text-left px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700/20 transition-colors">
+                      className="w-full text-left px-3 py-1.5 text-xs text-slate-300 hover:bg-blue-500/10 transition-colors">
                       {s}
                     </button>
                   ))}
@@ -151,7 +151,7 @@ export default function App() {
             <div className="flex flex-wrap gap-2">
               {activeSymbols.map((s) => (
                 <button key={s} onClick={() => handleRemovePair(s)}
-                  className="flex items-center gap-1 px-2 py-1 rounded bg-slate-700/20 text-xs text-slate-300 hover:bg-red-500/20 hover:text-red-400 transition-colors">
+                  className="flex items-center gap-1 px-2 py-1 rounded bg-blue-500/10 text-xs text-slate-300 hover:bg-red-500/20 hover:text-red-400 transition-colors">
                   {s} <span className="text-slate-500 hover:text-red-400">×</span>
                 </button>
               ))}
@@ -161,9 +161,9 @@ export default function App() {
 
         {/* ── Config Panel ── */}
         {!botRunning && config && (
-          <div className="bg-[#131d2a]/80 rounded-xl border border-slate-700/20 p-4 space-y-3">
+          <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4 space-y-3">
             {/* ── Trading Settings ── */}
-            <div className="bg-[#0b1217]/60 rounded-lg p-3">
+            <div className="bg-[#050a14]/60 rounded-lg p-3">
               <h2 className="text-[10px] font-semibold text-sky-400/70 uppercase tracking-wider mb-2">Trading</h2>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
                 {[
@@ -176,14 +176,14 @@ export default function App() {
                     <input type="number" step={step}
                       value={(config as any)[section][key]}
                       onChange={(e) => handleConfigChange(section, key, +e.target.value)}
-                      className="w-full bg-[#0b1217] border border-slate-700/30 rounded-lg px-2 py-1 text-sm font-mono text-slate-200" />
+                      className="w-full bg-[#050a14] border border-blue-500/[0.08] rounded-lg px-2 py-1 text-sm font-mono text-slate-200" />
                   </label>
                 ))}
                 <label className="space-y-0.5">
                   <span className="text-slate-500 text-[10px] uppercase">Islem Tipi</span>
                   <select value={config.trading.trade_type}
                     onChange={(e) => handleConfigChange("trading", "trade_type", e.target.value)}
-                    className="w-full bg-[#0b1217] border border-slate-700/30 rounded-lg px-2 py-1 text-sm text-slate-200">
+                    className="w-full bg-[#050a14] border border-blue-500/[0.08] rounded-lg px-2 py-1 text-sm text-slate-200">
                     {["BOTH","LONG","SHORT"].map(t => <option key={t} value={t}>{t}</option>)}
                   </select>
                 </label>
@@ -191,7 +191,7 @@ export default function App() {
             </div>
 
             {/* ── Adaptive PMax Info (read-only) ── */}
-            <div className="bg-[#0b1217]/60 rounded-lg p-3">
+            <div className="bg-[#050a14]/60 rounded-lg p-3">
               <div className="flex items-center gap-2">
                 <h2 className="text-[10px] font-semibold text-sky-400/70 uppercase tracking-wider">
                   Adaptive PMax — {config.strategy.timeframes[0]?.label || "3m"}
@@ -260,26 +260,26 @@ export default function App() {
 
         {/* ── Open Positions ── */}
         {status?.positions && status.positions.length > 0 && (
-          <div className="bg-[#131d2a]/80 rounded-xl border border-slate-700/20 p-4">
+          <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4">
             <h2 className="text-sm font-semibold text-slate-300 mb-3">Acik Pozisyonlar</h2>
             <PositionTable positions={status.positions} />
           </div>
         )}
 
         {/* ── Trade History ── */}
-        <div className="bg-[#131d2a]/80 rounded-xl border border-slate-700/20 p-4">
+        <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4">
           <h2 className="text-sm font-semibold text-slate-300 mb-3">Islem Gecmisi</h2>
           <TradeTable trades={status?.trade_log || []} />
         </div>
 
         {/* ── Signal Log ── */}
         {status?.signal_log && status.signal_log.length > 0 && (
-          <div className="bg-[#131d2a]/80 rounded-xl border border-slate-700/20 p-4">
+          <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4">
             <h2 className="text-sm font-semibold text-slate-300 mb-3">Sinyal Gecmisi</h2>
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead>
-                  <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-slate-700/20">
+                  <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-blue-500/[0.08]">
                     <th className="text-left py-2 px-2">Zaman</th>
                     <th className="text-left py-2 px-2">Symbol</th>
                     <th className="text-center py-2">Side</th>
@@ -290,7 +290,7 @@ export default function App() {
                 </thead>
                 <tbody>
                   {status.signal_log.map((s, i) => (
-                    <tr key={i} className="border-b border-slate-700/10">
+                    <tr key={i} className="border-b border-blue-500/[0.06]">
                       <td className="py-1.5 px-2 text-slate-400">{s.time}</td>
                       <td className="py-1.5 px-2 font-semibold">{s.symbol}</td>
                       <td className="py-1.5 text-center">

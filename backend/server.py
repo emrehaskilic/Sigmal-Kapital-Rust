@@ -522,8 +522,8 @@ def get_status():
             if ":" in pos_key:
                 tf_label = pos_key.rsplit(":", 1)[1]
 
-            # Size multiplier for this TF
-            size_mult = sim._size_multipliers.get(pos_key, 1.0)
+            # Size multiplier — Rust engine manages internally, default 1.0
+            size_mult = 1.0
 
             # LIVE mark price from orderbook (key is pure symbol)
             ob = orderbook.get(symbol_raw)
@@ -582,7 +582,7 @@ def get_status():
                 "realized_pnl_usdt": round(realized, 4),
                 "total_pnl_usdt": round(upnl_usdt + realized, 4),
                 "fees_usdt": round(total_fees_for_pos, 4),
-                "grid": RiskManager({}).get_grid_info(pos) if hasattr(pos, 'dca_levels') else None,
+                "grid": None,  # grid levels shown via chart-data endpoint
             })
 
     # Refresh stats after possible TP/SL exits
@@ -761,6 +761,8 @@ def get_chart_data(symbol: str = "BTCUSDT", limit: int = 500):
 
     # Build trade markers from simulator
     markers = []
+    grid_levels = []
+    pos = None
     sim = state.get("simulator")
     if sim:
         for trade in sim.trades:
@@ -771,7 +773,7 @@ def get_chart_data(symbol: str = "BTCUSDT", limit: int = 500):
 
             reason = trade.exit_reason
             if reason.startswith("DCA"):
-                # DCA entry marker
+                # DCA entry marker (DCA1, DCA2, DCA3, DCA4)
                 markers.append({
                     "time": exit_t or t,
                     "position": "belowBar" if trade.side == "LONG" else "aboveBar",
@@ -781,6 +783,7 @@ def get_chart_data(symbol: str = "BTCUSDT", limit: int = 500):
                     "price": trade.entry_price,
                 })
             elif reason == "TP":
+                # Take Profit marker
                 markers.append({
                     "time": exit_t,
                     "position": "aboveBar" if trade.side == "LONG" else "belowBar",
@@ -789,13 +792,44 @@ def get_chart_data(symbol: str = "BTCUSDT", limit: int = 500):
                     "text": f"TP +{trade.pnl_usdt:.2f}",
                     "price": trade.exit_price,
                 })
-            elif reason == "REVERSAL":
+            elif reason in ("REVERSAL", "REVERSAL_CLOSE"):
+                # Reversal (kill switch) marker
                 markers.append({
                     "time": exit_t,
                     "position": "aboveBar",
                     "color": "#f59e0b",
                     "shape": "square",
                     "text": f"REV {trade.pnl_usdt:+.2f}",
+                    "price": trade.exit_price,
+                })
+            elif reason == "PCT_STOP":
+                # Percentage hard stop marker (DCA full sonrasi %2.0 stop)
+                markers.append({
+                    "time": exit_t,
+                    "position": "aboveBar" if trade.side == "LONG" else "belowBar",
+                    "color": "#dc2626",
+                    "shape": "square",
+                    "text": f"STOP {trade.pnl_usdt:+.2f}",
+                    "price": trade.exit_price,
+                })
+            elif reason == "DYN_SL":
+                # Dynamic SL marker
+                markers.append({
+                    "time": exit_t,
+                    "position": "aboveBar" if trade.side == "LONG" else "belowBar",
+                    "color": "#dc2626",
+                    "shape": "square",
+                    "text": f"SL {trade.pnl_usdt:+.2f}",
+                    "price": trade.exit_price,
+                })
+            elif reason == "HARD_STOP":
+                # Hard stop marker
+                markers.append({
+                    "time": exit_t,
+                    "position": "aboveBar" if trade.side == "LONG" else "belowBar",
+                    "color": "#dc2626",
+                    "shape": "square",
+                    "text": f"HARD {trade.pnl_usdt:+.2f}",
                     "price": trade.exit_price,
                 })
 
@@ -814,20 +848,43 @@ def get_chart_data(symbol: str = "BTCUSDT", limit: int = 500):
                 "price": pos.initial_entry_price,
             })
 
-            # Add DCA level lines
-            grid_levels = []
-            for dca in pos.dca_levels:
+            # Grid levels: KC-based pending DCA/TP + avg entry + stop level
+            # Average entry price line
+            grid_levels.append({
+                "price": pos.average_entry_price,
+                "label": f"AVG ({pos.dca_fills_count} DCA)",
+                "filled": True,
+            })
+            # Pending DCA level (from KC band)
+            if pos.pending_dca_price > 0:
+                max_dca = cfg["trading"].get("max_dca_steps", 4)
+                if pos.dca_fills_count < max_dca:
+                    grid_levels.append({
+                        "price": pos.pending_dca_price,
+                        "label": f"DCA{pos.dca_fills_count + 1}",
+                        "filled": False,
+                    })
+            # Pending TP level (from KC band)
+            if pos.pending_tp_price > 0 and pos.dca_fills_count > 0:
                 grid_levels.append({
-                    "price": dca.price,
-                    "label": f"DCA{dca.step}",
-                    "filled": dca.filled,
-                })
-            # TP line
-            if pos.tp_price > 0:
-                grid_levels.append({
-                    "price": pos.tp_price,
+                    "price": pos.pending_tp_price,
                     "label": "TP",
                     "filled": False,
+                })
+            # PCT hard stop level (if DCA full)
+            pct_cfg = cfg["trading"].get("pct_hard_stop", {})
+            if pct_cfg.get("enabled", False):
+                loss_pct = pct_cfg.get("loss_pct", 2.5) / 100
+                if pos.side == "LONG":
+                    stop_price = pos.average_entry_price * (1 - loss_pct)
+                else:
+                    stop_price = pos.average_entry_price * (1 + loss_pct)
+                max_dca = cfg["trading"].get("max_dca_steps", 4)
+                grid_levels.append({
+                    "price": stop_price,
+                    "label": f"STOP {pct_cfg.get('loss_pct', 2.5)}%"
+                             + (" (aktif)" if pos.dca_fills_count >= max_dca else ""),
+                    "filled": pos.dca_fills_count >= max_dca,
                 })
 
     # Sort markers by time
@@ -1015,7 +1072,8 @@ def start_fast_backtest(body: dict):
 
     symbol = body.get("symbol", "ETHUSDT")
     days = body.get("days", 180)
-    oos_only = body.get("oos_only", True)
+    # OOS split disabled by default — user can enable via oos_only param
+    oos_only = body.get("oos_only", False)
 
     _fast_bt_state["running"] = True
     _fast_bt_state["progress"] = 0
@@ -1044,6 +1102,79 @@ def fast_backtest_status():
 @app.get("/api/backtest/fast/results")
 def fast_backtest_results():
     result = _fast_bt_state["result"]
+    if not result:
+        return {"status": "no_results"}
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════════
+# WALK-FORWARD OPTIMIZATION
+# ══════════════════════════════════════════════════════════════════════
+
+_wf_state: dict[str, Any] = {
+    "running": False,
+    "result": None,
+    "error": None,
+}
+
+
+def _run_walk_forward(symbol: str, days: int, trials: int) -> None:
+    try:
+        from core.engine.fast_backtest import fetch_and_cache_klines
+        from core.engine.walk_forward import run_walk_forward
+
+        project_root = str(Path(__file__).resolve().parent.parent)
+        cache_dir = str(Path(project_root) / "data")
+        df = fetch_and_cache_klines(symbol, "3m", days, cache_dir=cache_dir)
+
+        result = run_walk_forward(
+            df, is_days=90, oos_days=30, step_days=30,
+            trials_per_window=trials, leverage=40,
+            initial_balance=10000.0, symbol=symbol,
+        )
+        _wf_state["result"] = result
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        _wf_state["error"] = str(e)
+    finally:
+        _wf_state["running"] = False
+
+
+@app.post("/api/backtest/walkforward")
+def start_walk_forward(body: dict):
+    if _wf_state["running"]:
+        return {"error": "Walk-forward already running"}
+    symbol = body.get("symbol", "ETHUSDT")
+    days = body.get("days", 250)
+    trials = body.get("trials_per_window", 100)
+
+    _wf_state["running"] = True
+    _wf_state["result"] = None
+    _wf_state["error"] = None
+
+    thread = threading.Thread(
+        target=_run_walk_forward, args=(symbol, days, trials), daemon=True,
+    )
+    thread.start()
+    return {"status": "started", "symbol": symbol, "days": days, "trials_per_window": trials}
+
+
+@app.get("/api/backtest/walkforward/status")
+def walk_forward_status():
+    from core.engine.walk_forward import wf_progress
+    return {
+        "running": _wf_state["running"],
+        "window": wf_progress.get("window", 0),
+        "total_windows": wf_progress.get("total_windows", 0),
+        "phase": wf_progress.get("phase", "idle"),
+        "error": _wf_state["error"],
+    }
+
+
+@app.get("/api/backtest/walkforward/results")
+def walk_forward_results():
+    result = _wf_state["result"]
     if not result:
         return {"status": "no_results"}
     return result
