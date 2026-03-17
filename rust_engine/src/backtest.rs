@@ -120,6 +120,13 @@ pub struct BacktestConfig {
     pub atr_vol_enabled: bool,
     pub atr_vol_period: usize,
     pub atr_vol_percentile: f64,
+    // Graduated DCA
+    pub dca_step_multipliers: Vec<f64>,
+    // Graduated TP
+    pub tp_step_pcts: Vec<f64>,
+    // Cooldowns
+    pub min_ms_between_dca: i64,
+    pub min_ms_before_reversal: i64,
 }
 
 const WARMUP: usize = 200;
@@ -199,6 +206,10 @@ fn to_trading_config(cfg: &BacktestConfig) -> TradingConfig {
         dyn_sl_tighten: cfg.dsl_tighten,
         hard_stop_enabled: cfg.hs_enabled,
         hard_stop_atr_mult: cfg.hs_mult,
+        dca_step_multipliers: cfg.dca_step_multipliers.clone(),
+        tp_step_pcts: cfg.tp_step_pcts.clone(),
+        min_ms_between_dca: cfg.min_ms_between_dca,
+        min_ms_before_reversal: cfg.min_ms_before_reversal,
     }
 }
 

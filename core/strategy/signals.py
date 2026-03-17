@@ -1,6 +1,9 @@
 """Signal engine — generates LONG/SHORT entry signals using PMax (Profit Maximizer).
 
 PMax crossover logic: MAvg crosses above PMax → LONG, MAvg crosses below PMax → SHORT.
+
+Uses Rust (scalper_engine) indicators for numerical consistency with backtest.
+Falls back to Python indicators if Rust engine is not available.
 """
 
 from __future__ import annotations
@@ -13,6 +16,15 @@ import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# --- Rust engine integration for indicators ---
+try:
+    import scalper_engine
+    _USE_RUST = True
+    logger.info("SignalEngine: using Rust indicators (backtest-identical)")
+except ImportError:
+    _USE_RUST = False
+    logger.info("SignalEngine: Rust engine not available, using Python fallback")
 
 from core.strategy.indicators import (
     adaptive_pmax,
@@ -87,6 +99,84 @@ class SignalEngine:
         else:
             return df["close"]
 
+    def _to_arr(self, series: pd.Series) -> np.ndarray:
+        """Convert pandas Series to contiguous float64 numpy array."""
+        return np.ascontiguousarray(series.values, dtype=np.float64)
+
+    def _compute_pmax(self, src: pd.Series, high: pd.Series, low: pd.Series, close: pd.Series):
+        """Compute PMax using Rust engine (or Python fallback). Returns (pmax_vals, mavg_vals) as numpy arrays."""
+        if _USE_RUST:
+            pmax_config = {
+                "adaptive": self._pmax_adaptive,
+                "atr_period": self._atr_period,
+                "atr_multiplier": self._atr_multiplier,
+                "ma_length": self._ma_length,
+            }
+            if self._pmax_adaptive:
+                pmax_config.update({
+                    "vol_lookback": self._pmax_cfg.get("vol_lookback", 580),
+                    "flip_window": self._pmax_cfg.get("flip_window", 440),
+                    "mult_base": self._pmax_cfg.get("mult_base", 4.0),
+                    "mult_scale": self._pmax_cfg.get("mult_scale", 1.25),
+                    "ma_base": self._pmax_cfg.get("ma_base", 3),
+                    "ma_scale": self._pmax_cfg.get("ma_scale", 5.5),
+                    "atr_base": self._pmax_cfg.get("atr_base", 19),
+                    "atr_scale": self._pmax_cfg.get("atr_scale", 1.5),
+                    "update_interval": self._pmax_cfg.get("update_interval", 29),
+                })
+            pmax_arr, mavg_arr, _ = scalper_engine.compute_pmax(
+                self._to_arr(src), self._to_arr(high),
+                self._to_arr(low), self._to_arr(close), pmax_config,
+            )
+            return np.asarray(pmax_arr), np.asarray(mavg_arr)
+        else:
+            if self._pmax_adaptive:
+                pmax_line, mavg, _ = adaptive_pmax(src, high, low, close, self._pmax_cfg)
+            else:
+                pmax_line, mavg, _ = pmax(
+                    src, high, low, close,
+                    atr_period=self._atr_period, atr_multiplier=self._atr_multiplier,
+                    ma_type=self._ma_type, ma_length=self._ma_length,
+                    change_atr=self._change_atr, normalize_atr=self._normalize_atr,
+                )
+            return pmax_line.values, mavg.values
+
+    def _compute_rsi(self, close: pd.Series, period: int) -> float:
+        """Compute RSI last value using Rust or Python."""
+        if _USE_RUST:
+            arr = scalper_engine.compute_rsi(self._to_arr(close), period)
+            return float(np.asarray(arr)[-1])
+        return float(rsi(close, period).iloc[-1])
+
+    def _compute_atr(self, high: pd.Series, low: pd.Series, close: pd.Series, period: int) -> float:
+        """Compute ATR (EMA-based) last value using Rust or Python."""
+        if _USE_RUST:
+            arr = scalper_engine.compute_atr(self._to_arr(high), self._to_arr(low), self._to_arr(close), period)
+            return float(np.asarray(arr)[-1])
+        return float(atr(high, low, close, period).iloc[-1])
+
+    def _compute_ema_last(self, close: pd.Series, period: int) -> float:
+        """Compute EMA last value using Rust or Python."""
+        if _USE_RUST:
+            arr = scalper_engine.compute_ema(self._to_arr(close), period)
+            return float(np.asarray(arr)[-1])
+        return float(ema(close, period).iloc[-1])
+
+    def _compute_rsi_ema_last(self, close: pd.Series, rsi_period: int, ema_period: int = 10) -> float:
+        """Compute EMA(RSI) last value using Rust or Python."""
+        if _USE_RUST:
+            rsi_arr = scalper_engine.compute_rsi(self._to_arr(close), rsi_period)
+            ema_arr = scalper_engine.compute_ema(np.asarray(rsi_arr), ema_period)
+            return float(np.asarray(ema_arr)[-1])
+        return float(ema(rsi(close, rsi_period), ema_period).iloc[-1])
+
+    def _compute_atr_series(self, high: pd.Series, low: pd.Series, close: pd.Series, period: int) -> np.ndarray:
+        """Compute full ATR series using Rust or Python. Returns numpy array."""
+        if _USE_RUST:
+            arr = scalper_engine.compute_atr(self._to_arr(high), self._to_arr(low), self._to_arr(close), period)
+            return np.asarray(arr)
+        return atr(high, low, close, period).values
+
     def process(self, df: pd.DataFrame) -> Signal | None:
         """Process candle data — PMax crossover signal detection.
 
@@ -103,35 +193,16 @@ class SignalEngine:
         low = df["low"]
         src = self._get_source(df)
 
-        # --- RSI / ATR for filters ---
-        rsi_val = rsi(close, 28).iloc[-1]
-        atr_val = atr(high, low, close, 50).iloc[-1]
-
-
-
+        # --- RSI / ATR for filters (Rust) ---
+        rsi_val = self._compute_rsi(close, 28)
+        atr_val = self._compute_atr(high, low, close, 50)
 
         last = df.iloc[-1]
         symbol = str(last.get("symbol", ""))
         base_close = float(last["close"])
 
-        # --- Compute PMax (static or adaptive) ---
-        if self._pmax_adaptive:
-            pmax_line, mavg, direction = adaptive_pmax(
-                src, high, low, close, self._pmax_cfg,
-            )
-        else:
-            pmax_line, mavg, direction = pmax(
-                src, high, low, close,
-                atr_period=self._atr_period,
-                atr_multiplier=self._atr_multiplier,
-                ma_type=self._ma_type,
-                ma_length=self._ma_length,
-                change_atr=self._change_atr,
-                normalize_atr=self._normalize_atr,
-            )
-
-        pmax_vals = pmax_line.values
-        mavg_vals = mavg.values
+        # --- Compute PMax (Rust) ---
+        pmax_vals, mavg_vals = self._compute_pmax(src, high, low, close)
         n = len(mavg_vals)
 
         # --- Walk all bars — crossover state machine ---
@@ -158,13 +229,13 @@ class SignalEngine:
 
             if buy_cross and condition <= 0.0:
                 condition = 1.0
-                entry_price = float(closes[i]) if i == n - 1 else float(closes[i])
+                entry_price = float(closes[i])
                 entry_time = int(times[i])
                 last_transition_idx = i
 
             elif sell_cross and condition >= 0.0:
                 condition = -1.0
-                entry_price = float(closes[i]) if i == n - 1 else float(closes[i])
+                entry_price = float(closes[i])
                 entry_time = int(times[i])
                 last_transition_idx = i
 
@@ -217,30 +288,14 @@ class SignalEngine:
         low = df["low"]
         src = self._get_source(df)
 
-        rsi_val = rsi(close, 28).iloc[-1]
-        atr_val = atr(high, low, close, 50).iloc[-1]
+        rsi_val = self._compute_rsi(close, 28)
+        atr_val = self._compute_atr(high, low, close, 50)
 
         last = df.iloc[-1]
         symbol = str(last.get("symbol", ""))
 
-        # --- Compute PMax (static or adaptive) ---
-        if self._pmax_adaptive:
-            pmax_line, mavg, direction = adaptive_pmax(
-                src, high, low, close, self._pmax_cfg,
-            )
-        else:
-            pmax_line, mavg, direction = pmax(
-                src, high, low, close,
-                atr_period=self._atr_period,
-                atr_multiplier=self._atr_multiplier,
-                ma_type=self._ma_type,
-                ma_length=self._ma_length,
-                change_atr=self._change_atr,
-                normalize_atr=self._normalize_atr,
-            )
-
-        pmax_vals = pmax_line.values
-        mavg_vals = mavg.values
+        # --- Compute PMax (Rust) ---
+        pmax_vals, mavg_vals = self._compute_pmax(src, high, low, close)
         n = len(mavg_vals)
         times = df["open_time"].values
         closes = df["close"].values
@@ -272,7 +327,6 @@ class SignalEngine:
                 entry_time = int(times[i])
 
         # Backfill always returns the last crossover state — no filters applied.
-        # This represents the currently-active position that should be simulated.
         if condition == 1.0 and self._trade_type in ("LONG", "BOTH"):
             sig = Signal(
                 timestamp=entry_time,
@@ -317,7 +371,7 @@ class SignalEngine:
         if self._ema_filter.get("enabled", False):
             period = self._ema_filter.get("period", 144)
             if len(close) >= period:
-                ema_val = ema(close, period).iloc[-1]
+                ema_val = self._compute_ema_last(close, period)
                 current_close = float(close.iloc[-1])
                 if side == "LONG" and current_close < ema_val:
                     logger.debug("FILTER: LONG blocked — close %.4f < EMA(%d) %.4f",
@@ -332,7 +386,7 @@ class SignalEngine:
         if self._rsi_filter.get("enabled", False):
             ob = self._rsi_filter.get("overbought", 65)
             os_ = self._rsi_filter.get("oversold", 35)
-            rsi_ema = ema(rsi(close, self._rsi_filter.get("period", 28)), 10).iloc[-1]
+            rsi_ema = self._compute_rsi_ema_last(close, self._rsi_filter.get("period", 28), 10)
             if side == "LONG" and rsi_val > ob and rsi_val > rsi_ema:
                 logger.debug("FILTER: LONG blocked — RSI %.2f > OB %d", rsi_val, ob)
                 return False
@@ -346,13 +400,15 @@ class SignalEngine:
             high = df["high"]
             low = df["low"]
             atr_period = self._atr_filter.get("atr_period", 50)
-            atr_series = atr(high, low, close, atr_period)
-            lookback = min(200, len(atr_series))
-            atr_recent = atr_series.iloc[-lookback:]
-            threshold = float(np.percentile(atr_recent.dropna().values, min_pct))
-            if atr_val < threshold:
-                logger.debug("FILTER: signal blocked — ATR %.6f < percentile(%d) %.6f",
-                             atr_val, min_pct, threshold)
-                return False
+            atr_arr = self._compute_atr_series(high, low, close, atr_period)
+            lookback = min(200, len(atr_arr))
+            atr_recent = atr_arr[-lookback:]
+            valid = atr_recent[~np.isnan(atr_recent)]
+            if len(valid) > 0:
+                threshold = float(np.percentile(valid, min_pct))
+                if atr_val < threshold:
+                    logger.debug("FILTER: signal blocked — ATR %.6f < percentile(%d) %.6f",
+                                 atr_val, min_pct, threshold)
+                    return False
 
         return True

@@ -34,6 +34,21 @@ from core.strategy.indicators import (
 
 logger = logging.getLogger(__name__)
 
+MAX_CURVE_POINTS = 800  # max equity/drawdown points sent to frontend
+
+
+def _downsample(data: list, max_points: int) -> list:
+    """Uniform downsample keeping first and last points."""
+    if len(data) <= max_points:
+        return data
+    step = (len(data) - 2) / (max_points - 2)
+    out = [data[0]]
+    for i in range(1, max_points - 1):
+        out.append(data[round(i * step)])
+    out.append(data[-1])
+    return out
+
+
 # --- Rust engine integration ---
 try:
     import scalper_engine
@@ -181,6 +196,10 @@ def _run_rust_backtest(
         "atr_vol_enabled": atr_vol_filter.get("enabled", False),
         "atr_vol_period": atr_vol_filter.get("atr_period", 50),
         "atr_vol_percentile": atr_vol_filter.get("min_atr_percentile", 20.0),
+        "dca_step_multipliers": trading.get("dca_step_multipliers", [1.0, 1.0, 1.0, 1.0]),
+        "tp_step_pcts": trading.get("tp_step_pcts", []),
+        "min_ms_between_dca": trading.get("min_ms_between_dca", 0),
+        "min_ms_before_reversal": trading.get("min_ms_before_reversal", 0),
     }
 
     # Call Rust engine
@@ -201,8 +220,8 @@ def _run_rust_backtest(
 
     return FastBacktestResult(
         trades=result["trades"],
-        equity_curve=result["equity_curve"],
-        drawdown_curve=result["drawdown_curve"],
+        equity_curve=_downsample(result["equity_curve"], MAX_CURVE_POINTS),
+        drawdown_curve=_downsample(result["drawdown_curve"], MAX_CURVE_POINTS),
         metrics=m,
         per_symbol=result["per_symbol"],
     )
@@ -705,8 +724,8 @@ def _run_python_backtest(
 
     return FastBacktestResult(
         trades=trades,
-        equity_curve=equity_curve,
-        drawdown_curve=dd_curve,
+        equity_curve=_downsample(equity_curve, MAX_CURVE_POINTS),
+        drawdown_curve=_downsample(dd_curve, MAX_CURVE_POINTS),
         metrics=metrics,
         per_symbol=per_symbol,
     )

@@ -21,9 +21,18 @@ import pandas as pd
 
 from core.strategy.risk_manager import PositionState
 from core.strategy.signals import Signal
-from core.strategy.indicators import atr as atr_indicator, keltner_channel
 
 logger = logging.getLogger(__name__)
+
+# --- Rust engine integration for indicators ---
+try:
+    import scalper_engine
+    _USE_RUST_INDICATORS = True
+    logger.info("Simulator: using Rust indicators (backtest-identical)")
+except ImportError:
+    _USE_RUST_INDICATORS = False
+    logger.info("Simulator: Rust indicators not available, using Python fallback")
+    from core.strategy.indicators import atr as atr_indicator, keltner_channel
 
 
 @dataclass
@@ -94,6 +103,10 @@ def _build_rust_config(config: dict) -> dict:
         "dyn_sl_tighten": dyn_sl_cfg.get("tighten_on_dca_full", 0.95),
         "hard_stop_enabled": hard_stop_cfg.get("enabled", False),
         "hard_stop_atr_mult": hard_stop_cfg.get("atr_multiplier", 5.0),
+        "dca_step_multipliers": trading.get("dca_step_multipliers", [1.0, 1.0, 1.0, 1.0]),
+        "tp_step_pcts": trading.get("tp_step_pcts", []),
+        "min_ms_between_dca": trading.get("min_ms_between_dca", 0),
+        "min_ms_before_reversal": trading.get("min_ms_before_reversal", 0),
     }
 
 
@@ -249,24 +262,41 @@ class Simulator:
         candle_close = float(df["close"].iloc[-1])
         close_time = int(df["open_time"].iloc[-1])
 
-        # Compute Keltner Channel bands
-        kc_mid, kc_upper, kc_lower = keltner_channel(
-            df["high"], df["low"], df["close"],
-            kc_length=self._kc_length,
-            kc_multiplier=self._kc_multiplier,
-            atr_period=self._kc_atr_period,
-        )
-        upper_val = float(kc_upper.iloc[-1])
-        lower_val = float(kc_lower.iloc[-1])
+        # Compute Keltner Channel bands (Rust or Python)
+        high_arr = np.ascontiguousarray(df["high"].values, dtype=np.float64)
+        low_arr = np.ascontiguousarray(df["low"].values, dtype=np.float64)
+        close_arr = np.ascontiguousarray(df["close"].values, dtype=np.float64)
+
+        if _USE_RUST_INDICATORS:
+            _, kc_upper_arr, kc_lower_arr = scalper_engine.compute_keltner(
+                high_arr, low_arr, close_arr,
+                self._kc_length, self._kc_multiplier, self._kc_atr_period,
+            )
+            upper_val = float(np.asarray(kc_upper_arr)[-1])
+            lower_val = float(np.asarray(kc_lower_arr)[-1])
+        else:
+            kc_mid, kc_upper, kc_lower = keltner_channel(
+                df["high"], df["low"], df["close"],
+                kc_length=self._kc_length,
+                kc_multiplier=self._kc_multiplier,
+                atr_period=self._kc_atr_period,
+            )
+            upper_val = float(kc_upper.iloc[-1])
+            lower_val = float(kc_lower.iloc[-1])
+
         if np.isnan(upper_val) or np.isnan(lower_val):
             return []
 
-        # Compute Dynamic SL ATR if enabled
+        # Compute Dynamic SL ATR if enabled (Rust or Python)
         dyn_sl_atr = 0.0
         if self._dyn_sl_enabled and len(df) > self._dyn_sl_atr_period:
-            atr_series = atr_indicator(df["high"], df["low"], df["close"],
-                                       self._dyn_sl_atr_period)
-            val = float(atr_series.iloc[-1])
+            if _USE_RUST_INDICATORS:
+                atr_arr = scalper_engine.compute_atr(high_arr, low_arr, close_arr, self._dyn_sl_atr_period)
+                val = float(np.asarray(atr_arr)[-1])
+            else:
+                atr_series = atr_indicator(df["high"], df["low"], df["close"],
+                                           self._dyn_sl_atr_period)
+                val = float(atr_series.iloc[-1])
             if not np.isnan(val) and val > 0:
                 dyn_sl_atr = val
 

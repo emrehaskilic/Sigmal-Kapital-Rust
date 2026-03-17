@@ -41,6 +41,14 @@ pub struct TradingConfig {
     // ATR hard stop (emergency backup, H/L based)
     pub hard_stop_enabled: bool,
     pub hard_stop_atr_mult: f64,
+    // Graduated DCA step multipliers (e.g. [1.0, 1.3, 1.6, 2.0])
+    pub dca_step_multipliers: Vec<f64>,
+    // Graduated TP close percentages per DCA depth (e.g. [0.40, 0.50, 0.60, 0.70])
+    pub tp_step_pcts: Vec<f64>,
+    // DCA speed limiter: minimum milliseconds between DCA fills
+    pub min_ms_between_dca: i64,
+    // Reversal cooldown: minimum milliseconds after entry before reversal allowed
+    pub min_ms_before_reversal: i64,
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -63,6 +71,7 @@ pub struct PositionState {
     pub hard_stop_price: f64,
     pub pending_dca_price: f64,
     pub pending_tp_price: f64,
+    pub last_dca_time: i64,
 }
 
 impl PositionState {
@@ -82,6 +91,7 @@ impl PositionState {
             hard_stop_price: 0.0,
             pending_dca_price: 0.0,
             pending_tp_price: 0.0,
+            last_dca_time: 0,
         }
     }
 }
@@ -325,6 +335,13 @@ impl TradingEngine {
             return events;
         }
 
+        // Reversal cooldown: block reversal if too soon after last signal
+        if has_pos && self.config.min_ms_before_reversal > 0 {
+            if timestamp - last_ts < self.config.min_ms_before_reversal {
+                return events;
+            }
+        }
+
         // Kill switch: close existing opposite position
         if has_pos {
             let existing_side = self.positions[&key].side;
@@ -370,6 +387,7 @@ impl TradingEngine {
             hard_stop_price,
             pending_dca_price: 0.0,
             pending_tp_price: 0.0,
+            last_dca_time: 0,
         };
 
         self.positions.insert(key.clone(), pos);
@@ -498,8 +516,18 @@ impl TradingEngine {
     // ── DCA Fill ──
 
     fn process_dca_fill(&mut self, key: &str, fill_price: f64, timestamp: i64) -> Vec<TradeEvent> {
+        // DCA speed limiter: block if too soon after last DCA
+        if self.config.min_ms_between_dca > 0 {
+            let last_dca = self.positions.get(key).map_or(0, |p| p.last_dca_time);
+            if last_dca > 0 && timestamp - last_dca < self.config.min_ms_between_dca {
+                return vec![];
+            }
+        }
+
         let size_mult = self.size_multipliers.get(key).copied().unwrap_or(1.0);
-        let dca_margin = self.get_step_margin(size_mult);
+        let dca_step = self.positions.get(key).map_or(0, |p| p.dca_fills as usize);
+        let step_mult = self.config.dca_step_multipliers.get(dca_step).copied().unwrap_or(1.0);
+        let dca_margin = self.get_step_margin(size_mult) * step_mult;
 
         if self.wallet.balance < dca_margin {
             return vec![];
@@ -520,6 +548,7 @@ impl TradingEngine {
         pos.dca_fills += 1;
         pos.dca_wave_sold = 0;
         pos.margin_per_step = dca_margin;
+        pos.last_dca_time = timestamp;
 
         // Update hard stop after DCA
         if self.config.hard_stop_enabled && pos.entry_atr > 0.0 {
@@ -559,7 +588,14 @@ impl TradingEngine {
         let pos = self.positions.get(key).unwrap();
         let avg_before = pos.avg_entry_price;
         let side = pos.side;
-        let closed_notional = pos.total_notional * self.config.tp_close_pct;
+        // Graduated TP: use dca_fills-based close percentage
+        let tp_pct = if !self.config.tp_step_pcts.is_empty() && pos.dca_fills > 0 {
+            let idx = (pos.dca_fills - 1) as usize;
+            self.config.tp_step_pcts.get(idx).copied().unwrap_or(self.config.tp_close_pct)
+        } else {
+            self.config.tp_close_pct
+        };
+        let closed_notional = pos.total_notional * tp_pct;
 
         if closed_notional <= 0.0 {
             return vec![];
@@ -710,6 +746,10 @@ mod tests {
             dyn_sl_tighten: 0.95,
             hard_stop_enabled: false,
             hard_stop_atr_mult: 5.0,
+            dca_step_multipliers: vec![1.0, 1.0, 1.0, 1.0],
+            tp_step_pcts: vec![],
+            min_ms_between_dca: 0,
+            min_ms_before_reversal: 0,
         }
     }
 

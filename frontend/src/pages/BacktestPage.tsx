@@ -35,6 +35,20 @@ const fmtDateTime = (ts: number) => {
 const DAYS_TR = ["Pazar", "Pazartesi", "Sali", "Carsamba", "Persembe", "Cuma", "Cumartesi"];
 const MONTHS_TR = ["Oca", "Sub", "Mar", "Nis", "May", "Haz", "Tem", "Agu", "Eyl", "Eki", "Kas", "Ara"];
 
+/* ── downsample: keep max N points using LTTB-like uniform sampling ── */
+function downsample<T>(data: T[], maxPoints: number): T[] {
+  if (data.length <= maxPoints) return data;
+  const step = (data.length - 2) / (maxPoints - 2);
+  const out: T[] = [data[0]];
+  for (let i = 1; i < maxPoints - 1; i++) {
+    out.push(data[Math.round(i * step)]);
+  }
+  out.push(data[data.length - 1]);
+  return out;
+}
+
+const TRADES_PER_PAGE = 50;
+
 /* ── Section wrapper ── */
 const Section = ({ title, children, className = "" }: { title: string; children: React.ReactNode; className?: string }) => (
   <div className={`bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4 ${className}`}>
@@ -57,6 +71,7 @@ export default function BacktestPage() {
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tradeFilter, setTradeFilter] = useState<string>("ALL");
+  const [tradePage, setTradePage] = useState(0);
 
   // (history/compare removed)
 
@@ -226,12 +241,12 @@ export default function BacktestPage() {
       syms.forEach(s => { point[s] = +cumMap[s].toFixed(2); });
       points.push(point);
     }
-    return { points, symbols: syms };
+    return { points: downsample(points, 500), symbols: syms };
   }, [result]);
 
   const durationVsPnl = useMemo(() => {
     if (!result?.trades.length) return [];
-    return result.trades
+    const all = result.trades
       .filter(t => t.entry_time && t.exit_time && t.exit_time > t.entry_time)
       .map(t => ({
         duration: +((t.exit_time - t.entry_time) / 60000).toFixed(1),
@@ -239,6 +254,7 @@ export default function BacktestPage() {
         symbol: t.symbol,
         side: t.side,
       }));
+    return downsample(all, 500);
   }, [result]);
 
   const rollingWinRate = useMemo(() => {
@@ -250,7 +266,7 @@ export default function BacktestPage() {
       const wins = slice.filter(t => t.pnl_usdt > 0).length;
       points.push({ idx: i + 1, winRate: +(wins / window * 100).toFixed(1) });
     }
-    return points;
+    return downsample(points, 500);
   }, [result]);
 
   /* ── custom tooltip ── */
@@ -846,10 +862,12 @@ export default function BacktestPage() {
             )}
 
             {/* ── Per-Trade PnL Chart ── */}
-            {result!.trades.length > 0 && (
-              <Section title="Islem Bazinda PnL (USDT)">
+            {result!.trades.length > 0 && (() => {
+              const chartTrades = downsample(result!.trades, 200);
+              return (
+              <Section title={`Islem Bazinda PnL (USDT) — ${result!.trades.length > 200 ? `${result!.trades.length} islemden 200 ornekleme` : `${result!.trades.length} islem`}`}>
                 <ResponsiveContainer width="100%" height={200}>
-                  <BarChart data={result!.trades}>
+                  <BarChart data={chartTrades}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                     <XAxis dataKey="id" tick={{ fontSize: 9, fill: "#64748b" }} />
                     <YAxis tick={{ fontSize: 10, fill: "#64748b" }}
@@ -871,29 +889,46 @@ export default function BacktestPage() {
                     }} />
                     <ReferenceLine y={0} stroke="#334155" strokeWidth={1} />
                     <Bar dataKey="pnl_usdt" name="PnL">
-                      {result!.trades.map((t, i) => (
+                      {chartTrades.map((t, i) => (
                         <Cell key={i} fill={t.pnl_usdt >= 0 ? "#10b981" : "#ef4444"} fillOpacity={0.7} />
                       ))}
                     </Bar>
                   </BarChart>
                 </ResponsiveContainer>
               </Section>
-            )}
+              );
+            })()}
 
-            {/* ── Trade Table ── */}
+            {/* ── Trade Table (Paginated) ── */}
             {result!.trades.length > 0 && (() => {
               const uniqueSyms = [...new Set(result!.trades.map(t => t.symbol))].sort();
               const filtered = tradeFilter === "ALL" ? result!.trades : result!.trades.filter(t => t.symbol === tradeFilter);
+              const totalPages = Math.ceil(filtered.length / TRADES_PER_PAGE);
+              const safePage = Math.min(tradePage, totalPages - 1);
+              const pageSlice = filtered.slice(safePage * TRADES_PER_PAGE, (safePage + 1) * TRADES_PER_PAGE);
               return (
               <Section title={`Islem Listesi (${filtered.length})`}>
                 <div className="flex items-center gap-3 mb-3">
-                  <select value={tradeFilter} onChange={(e) => setTradeFilter(e.target.value)}
+                  <select value={tradeFilter} onChange={(e) => { setTradeFilter(e.target.value); setTradePage(0); }}
                     className="bg-[#050a14] border border-blue-500/[0.08] rounded-lg px-2 py-1 text-xs text-slate-200">
                     <option value="ALL">Tum Pairler</option>
                     {uniqueSyms.map(s => <option key={s} value={s}>{s}</option>)}
                   </select>
+                  {totalPages > 1 && (
+                    <div className="flex items-center gap-1 ml-auto">
+                      <button onClick={() => setTradePage(0)} disabled={safePage === 0}
+                        className="px-2 py-1 text-[10px] rounded bg-blue-500/10 text-slate-300 hover:bg-blue-500/20 disabled:opacity-30">{"<<"}</button>
+                      <button onClick={() => setTradePage(Math.max(0, safePage - 1))} disabled={safePage === 0}
+                        className="px-2 py-1 text-[10px] rounded bg-blue-500/10 text-slate-300 hover:bg-blue-500/20 disabled:opacity-30">{"<"}</button>
+                      <span className="text-[10px] text-slate-400 px-2">{safePage + 1} / {totalPages}</span>
+                      <button onClick={() => setTradePage(Math.min(totalPages - 1, safePage + 1))} disabled={safePage >= totalPages - 1}
+                        className="px-2 py-1 text-[10px] rounded bg-blue-500/10 text-slate-300 hover:bg-blue-500/20 disabled:opacity-30">{">"}</button>
+                      <button onClick={() => setTradePage(totalPages - 1)} disabled={safePage >= totalPages - 1}
+                        className="px-2 py-1 text-[10px] rounded bg-blue-500/10 text-slate-300 hover:bg-blue-500/20 disabled:opacity-30">{">>"}</button>
+                    </div>
+                  )}
                 </div>
-                <div className="overflow-x-auto max-h-96 overflow-y-auto">
+                <div className="overflow-x-auto">
                   <table className="w-full text-xs">
                     <thead className="sticky top-0 bg-[#0a1628]">
                       <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-blue-500/[0.08]">
@@ -911,7 +946,7 @@ export default function BacktestPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {filtered.map((t) => (
+                      {pageSlice.map((t) => (
                         <tr key={t.id} className="border-b border-blue-500/[0.06] hover:bg-blue-500/10">
                           <td className="py-1.5 px-2 text-slate-500">{t.id}</td>
                           <td className="py-1.5 px-2 font-semibold">{t.symbol}</td>

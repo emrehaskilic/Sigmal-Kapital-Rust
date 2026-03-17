@@ -1,7 +1,8 @@
-# Scalper Bot Configuration — ETHUSDT Unified WF Strategy (DD25)
-# Adaptive PMax + Keltner Channel DCA/TP + Kelly Dynamic Compounding + PCT Hard Stop
-# $10K -> $369,540 | +3,595.4% | DD 23.3% | WR 93.8% | 4,838 trades
-# Optimized: 1000 trial x 25 hafta Unified WF | Rust Engine 178x | 2026-03-17
+# Scalper Bot Configuration — ETHUSDT E-Scenario Strategy
+# Adaptive PMax + Keltner Channel + Graduated DCA [1,1.5,2,2.5] + Graduated TP [50,60,70,80]
+# $10K -> $1,335,820 | +13,258.2% | DD 30.4% | WR 84.4% | PF 1.70 | 5,751 trades | 118 gun
+# Haftalik (53 hafta, $10K sabit): %90.6 karli | Ort +37.8%/hafta | Max DD 30.4%
+# Rust Engine 178x | 2026-03-17
 
 exchange:
   name: binance
@@ -63,7 +64,7 @@ strategy:
     enabled: true
     tiers:
       - max_balance: 30000
-        comp_pct: 3.0             # < $30K: %3 margin (agresif ama kontrollü)
+        comp_pct: 3.0             # < $30K: %3 margin
       - max_balance: 150000
         comp_pct: 5.0             # $30K-$150K: %5 margin (buyume)
       - max_balance: 999999999
@@ -71,7 +72,7 @@ strategy:
 
 trading:
   initial_balance: 10000.0
-  leverage: 25                    # 25x leverage (PDF stratejisi)
+  leverage: 25                    # 25x leverage
   symbols:
     - "ETHUSDT"
   margin_per_trade: 300.0         # Base margin (dynamic comp overrides)
@@ -80,6 +81,20 @@ trading:
   maker_fee: 0.0002
   taker_fee: 0.0005
   hedge_mode: false
+
+  # --- GRADUATED DCA (E-Scenario) ---
+  # Her DCA adiminda artan margin carpani
+  # Derin DCA = daha agresif entry duzeltme
+  dca_step_multipliers: [1.0, 1.5, 2.0, 2.5]
+
+  # --- GRADUATED TP (E-Scenario) ---
+  # DCA derinligine gore TP kapatma orani artar
+  # Buyuk pozisyon = agresif kar alma = DD kontrolu
+  tp_step_pcts: [0.50, 0.60, 0.70, 0.80]
+
+  # --- COOLDOWNS (opsiyonel, 0 = devre disi) ---
+  min_ms_between_dca: 0           # DCA hiz siniri (ms, 0=yok)
+  min_ms_before_reversal: 0       # Reversal cooldown (ms, 0=yok)
 
   # --- RISK ---
   hard_stop:
@@ -93,11 +108,11 @@ trading:
     tighten_on_dca_full: 0.95
   pct_hard_stop:
     enabled: true                 # Yuzde bazli hard stop AKTIF
-    loss_pct: 2.0                 # DCA full sonrasi %2.0 kayip = pozisyon kapat (DD25->DD22.5)
+    loss_pct: 2.0                 # DCA full sonrasi %2.0 kayip = pozisyon kapat
   max_dca_steps: 4                # Maksimum 4 DCA adimi
-  tp_close_pct: 0.50              # Her TP'de %50 kapat (yarisini sat)
+  tp_close_pct: 0.50              # Default TP (graduated TP override eder)
 
 protection:
-  max_drawdown_pct: 25.0          # Max DD %25 siniri (PDF ile uyumlu)
+  max_drawdown_pct: 25.0          # Max DD %25 siniri
   max_total_margin_pct: 70.0
   max_open_positions: 1

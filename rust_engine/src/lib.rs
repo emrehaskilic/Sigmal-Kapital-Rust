@@ -11,7 +11,7 @@ mod adaptive_pmax;
 pub mod engine;
 mod backtest;
 
-use numpy::PyReadonlyArray1;
+use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -274,11 +274,183 @@ fn parse_config(d: &Bound<'_, PyDict>) -> PyResult<BacktestConfig> {
         atr_vol_enabled: get_b("atr_vol_enabled", false),
         atr_vol_period: get_u("atr_vol_period", 50),
         atr_vol_percentile: get_f("atr_vol_percentile", 20.0),
+
+        dca_step_multipliers: {
+            let mut mults = Vec::new();
+            if let Ok(Some(list_obj)) = d.get_item("dca_step_multipliers") {
+                if let Ok(list) = list_obj.downcast::<PyList>() {
+                    for item in list.iter() {
+                        if let Ok(v) = item.extract::<f64>() {
+                            mults.push(v);
+                        }
+                    }
+                }
+            }
+            if mults.is_empty() { vec![1.0, 1.0, 1.0, 1.0] } else { mults }
+        },
+        tp_step_pcts: {
+            let mut pcts = Vec::new();
+            if let Ok(Some(list_obj)) = d.get_item("tp_step_pcts") {
+                if let Ok(list) = list_obj.downcast::<PyList>() {
+                    for item in list.iter() {
+                        if let Ok(v) = item.extract::<f64>() {
+                            pcts.push(v);
+                        }
+                    }
+                }
+            }
+            pcts // empty = use default tp_close_pct
+        },
+        min_ms_between_dca: d.get_item("min_ms_between_dca").ok().flatten()
+            .and_then(|v| v.extract::<i64>().ok()).unwrap_or(0),
+        min_ms_before_reversal: d.get_item("min_ms_before_reversal").ok().flatten()
+            .and_then(|v| v.extract::<i64>().ok()).unwrap_or(0),
     })
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Indicator exports — same Rust functions used by backtest,
+// now available to dry-run (signals.py, simulator.py) for consistency.
+// ═══════════════════════════════════════════════════════════════════
+
+/// Compute PMax (adaptive or static). Returns (pmax_line, mavg, direction) as numpy arrays.
+#[pyfunction]
+#[pyo3(signature = (src, high, low, close, config))]
+fn compute_pmax<'py>(
+    py: Python<'py>,
+    src: PyReadonlyArray1<'py, f64>,
+    high: PyReadonlyArray1<'py, f64>,
+    low: PyReadonlyArray1<'py, f64>,
+    close: PyReadonlyArray1<'py, f64>,
+    config: &Bound<'py, PyDict>,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+    let s = as_slice(&src);
+    let h = as_slice(&high);
+    let l = as_slice(&low);
+    let c = as_slice(&close);
+
+    let get_f = |key: &str, default: f64| -> f64 {
+        config.get_item(key).ok().flatten()
+            .and_then(|v| v.extract::<f64>().ok()).unwrap_or(default)
+    };
+    let get_u = |key: &str, default: usize| -> usize {
+        config.get_item(key).ok().flatten()
+            .and_then(|v| v.extract::<usize>().ok()).unwrap_or(default)
+    };
+    let get_b = |key: &str, default: bool| -> bool {
+        config.get_item(key).ok().flatten()
+            .and_then(|v| v.extract::<bool>().ok()).unwrap_or(default)
+    };
+
+    let adaptive = get_b("adaptive", false);
+    let atr_period = get_u("atr_period", 10);
+    let atr_multiplier = get_f("atr_multiplier", 3.0);
+    let ma_length = get_u("ma_length", 10);
+
+    let result = if adaptive {
+        adaptive_pmax::adaptive_pmax_continuous(
+            s, h, l, c,
+            atr_period, atr_multiplier, ma_length,
+            get_u("vol_lookback", 580),
+            get_u("flip_window", 440),
+            get_f("mult_base", 4.0),
+            get_f("mult_scale", 1.25),
+            get_u("ma_base", 3),
+            get_f("ma_scale", 5.5),
+            get_u("atr_base", 19),
+            get_f("atr_scale", 1.5),
+            get_u("update_interval", 29),
+        )
+    } else {
+        adaptive_pmax::pmax_static(s, h, l, c, atr_period, atr_multiplier, ma_length)
+    };
+
+    Ok((
+        PyArray1::from_vec(py, result.pmax_line),
+        PyArray1::from_vec(py, result.mavg),
+        PyArray1::from_vec(py, result.direction),
+    ))
+}
+
+/// Compute Keltner Channel. Returns (mid, upper, lower) as numpy arrays.
+#[pyfunction]
+#[pyo3(signature = (high, low, close, kc_length, kc_multiplier, atr_period))]
+fn compute_keltner<'py>(
+    py: Python<'py>,
+    high: PyReadonlyArray1<'py, f64>,
+    low: PyReadonlyArray1<'py, f64>,
+    close: PyReadonlyArray1<'py, f64>,
+    kc_length: usize,
+    kc_multiplier: f64,
+    atr_period: usize,
+) -> (Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>) {
+    let (mid, upper, lower) = indicators::keltner_channel(
+        as_slice(&high), as_slice(&low), as_slice(&close),
+        kc_length, kc_multiplier, atr_period,
+    );
+    (
+        PyArray1::from_vec(py, mid),
+        PyArray1::from_vec(py, upper),
+        PyArray1::from_vec(py, lower),
+    )
+}
+
+/// Compute EMA. Returns numpy array.
+#[pyfunction]
+#[pyo3(signature = (data, period))]
+fn compute_ema<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period: usize,
+) -> Bound<'py, PyArray1<f64>> {
+    PyArray1::from_vec(py, indicators::ema(as_slice(&data), period))
+}
+
+/// Compute RSI. Returns numpy array.
+#[pyfunction]
+#[pyo3(signature = (close, period))]
+fn compute_rsi<'py>(
+    py: Python<'py>,
+    close: PyReadonlyArray1<'py, f64>,
+    period: usize,
+) -> Bound<'py, PyArray1<f64>> {
+    PyArray1::from_vec(py, indicators::rsi(as_slice(&close), period))
+}
+
+/// Compute ATR (EMA-based, ewm(span=period)). Returns numpy array.
+#[pyfunction]
+#[pyo3(signature = (high, low, close, period))]
+fn compute_atr<'py>(
+    py: Python<'py>,
+    high: PyReadonlyArray1<'py, f64>,
+    low: PyReadonlyArray1<'py, f64>,
+    close: PyReadonlyArray1<'py, f64>,
+    period: usize,
+) -> Bound<'py, PyArray1<f64>> {
+    PyArray1::from_vec(py, indicators::atr_span(as_slice(&high), as_slice(&low), as_slice(&close), period))
+}
+
+/// Compute ATR-RMA (Wilder's method, ewm(alpha=1/period)). Returns numpy array.
+#[pyfunction]
+#[pyo3(signature = (high, low, close, period))]
+fn compute_atr_rma<'py>(
+    py: Python<'py>,
+    high: PyReadonlyArray1<'py, f64>,
+    low: PyReadonlyArray1<'py, f64>,
+    close: PyReadonlyArray1<'py, f64>,
+    period: usize,
+) -> Bound<'py, PyArray1<f64>> {
+    PyArray1::from_vec(py, indicators::atr_rma(as_slice(&high), as_slice(&low), as_slice(&close), period))
 }
 
 #[pymodule]
 fn scalper_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_fast_backtest, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_pmax, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_keltner, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_ema, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_rsi, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_atr, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_atr_rma, m)?)?;
     Ok(())
 }
