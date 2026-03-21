@@ -4,24 +4,24 @@ interface BadgeProps {
 }
 
 const STYLES: Record<string, string> = {
-  "WS LIVE": "bg-emerald-400/15 text-emerald-400 border-emerald-400/25",
-  LIVE: "bg-emerald-400/15 text-emerald-400 border-emerald-400/25",
-  REST: "bg-yellow-400/15 text-yellow-400 border-yellow-400/25",
-  STALE: "bg-red-400/15 text-red-400 border-red-400/25",
-  CONNECTING: "bg-amber-400/15 text-amber-400 border-amber-400/25",
-  DISCONNECTED: "bg-slate-500/15 text-slate-500 border-slate-500/25",
+  "WS LIVE": "bg-teal-500/10 text-teal-400 border-teal-500/20",
+  LIVE: "bg-teal-500/10 text-teal-400 border-teal-500/20",
+  REST: "bg-amber-500/10 text-amber-400 border-amber-500/20",
+  STALE: "bg-rose-500/10 text-rose-400 border-rose-500/20",
+  CONNECTING: "bg-amber-500/10 text-amber-400 border-amber-500/20",
+  DISCONNECTED: "bg-slate-500/10 text-slate-500 border-slate-500/20",
 };
 
 export function Badge({ status, label }: BadgeProps) {
   return (
     <span
-      className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium border ${STYLES[status] || STYLES.DISCONNECTED}`}
+      className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-medium border ${STYLES[status] || STYLES.DISCONNECTED}`}
     >
       <span
         className={`w-1.5 h-1.5 rounded-full ${
-          status === "WS LIVE" || status === "LIVE" ? "bg-emerald-400 animate-pulse" :
-          status === "REST" ? "bg-yellow-400 animate-pulse" :
-          status === "STALE" ? "bg-red-400" :
+          status === "WS LIVE" || status === "LIVE" ? "bg-teal-400 animate-pulse" :
+          status === "REST" ? "bg-amber-400 animate-pulse" :
+          status === "STALE" ? "bg-rose-400" :
           status === "CONNECTING" ? "bg-amber-400 animate-pulse" :
           "bg-slate-500"
         }`}

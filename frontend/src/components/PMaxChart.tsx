@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTheme } from "../theme";
 import {
   createChart,
   ColorType,
@@ -37,21 +38,36 @@ interface GridLevel {
   filled: boolean;
 }
 
+interface ConfigFlags {
+  pct_stop_enabled: boolean;
+  filters_enabled: boolean;
+  dyncomp_enabled: boolean;
+}
+
 interface ChartDataResponse {
   candles: Candle[];
   markers: MarkerData[];
   grid_levels: GridLevel[];
+  live_markers?: MarkerData[];
+  config_flags?: ConfigFlags;
   error?: string;
 }
 
 interface Props {
   symbol: string;
   botRunning: boolean;
+  /** Chart title override */
+  title?: string;
+  /** "dryrun" = all markers same style, "live" = past signals dimmed, live trades highlighted */
+  mode?: "dryrun" | "live";
+  /** Live trade markers to overlay (from live executor) */
+  liveMarkers?: MarkerData[];
 }
 
-const BASE = "http://localhost:8000";
+const BASE = `http://${window.location.hostname}:8000`;
 
-export function PMaxChart({ symbol, botRunning }: Props) {
+export function PMaxChart({ symbol, botRunning, title, mode = "dryrun", liveMarkers }: Props) {
+  const { theme } = useTheme();
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -59,6 +75,11 @@ export function PMaxChart({ symbol, botRunning }: Props) {
   const kcUpperRef = useRef<ISeriesApi<"Line"> | null>(null);
   const kcLowerRef = useRef<ISeriesApi<"Line"> | null>(null);
   const [loading, setLoading] = useState(true);
+  const [configFlags, setConfigFlags] = useState<ConfigFlags>({
+    pct_stop_enabled: false,
+    filters_enabled: false,
+    dyncomp_enabled: false,
+  });
   const pollRef = useRef<number | null>(null);
   const priceLinesRef = useRef<any[]>([]);
 
@@ -68,18 +89,18 @@ export function PMaxChart({ symbol, botRunning }: Props) {
 
     const chart = createChart(containerRef.current, {
       layout: {
-        background: { type: ColorType.Solid, color: "#050a14" },
-        textColor: "#94a3b8",
-        fontSize: 11,
+        background: { type: ColorType.Solid, color: theme === "dark" ? "#040810" : "#ffffff" },
+        textColor: theme === "dark" ? "#64748b" : "#94a3b8",
+        fontSize: 10,
       },
       grid: {
-        vertLines: { color: "#1e293b30" },
-        horzLines: { color: "#1e293b30" },
+        vertLines: { color: "#1e293b18" },
+        horzLines: { color: "#1e293b18" },
       },
       crosshair: { mode: CrosshairMode.Normal },
-      rightPriceScale: { borderColor: "#1e293b" },
+      rightPriceScale: { borderColor: "#1e293b40" },
       timeScale: {
-        borderColor: "#1e293b",
+        borderColor: "#1e293b40",
         timeVisible: true,
         secondsVisible: false,
       },
@@ -88,24 +109,24 @@ export function PMaxChart({ symbol, botRunning }: Props) {
     });
 
     const candle = chart.addCandlestickSeries({
-      upColor: "#22c55e",
-      downColor: "#ef4444",
-      borderUpColor: "#22c55e",
-      borderDownColor: "#ef4444",
-      wickUpColor: "#22c55e80",
-      wickDownColor: "#ef444480",
+      upColor: "#2dd4bf",
+      downColor: "#f43f5e",
+      borderUpColor: "#2dd4bf",
+      borderDownColor: "#f43f5e",
+      wickUpColor: "#2dd4bf50",
+      wickDownColor: "#f43f5e50",
     });
 
     const pmax = chart.addLineSeries({
-      color: "#ef4444",
-      lineWidth: 2,
+      color: "#f43f5e",
+      lineWidth: 1,
       priceLineVisible: false,
       lastValueVisible: false,
       crosshairMarkerVisible: false,
     });
 
     const kcUpper = chart.addLineSeries({
-      color: "#f59e0b80",
+      color: "#f59e0b40",
       lineWidth: 1,
       lineStyle: 2,
       priceLineVisible: false,
@@ -114,7 +135,7 @@ export function PMaxChart({ symbol, botRunning }: Props) {
     });
 
     const kcLower = chart.addLineSeries({
-      color: "#f59e0b80",
+      color: "#f59e0b40",
       lineWidth: 1,
       lineStyle: 2,
       priceLineVisible: false,
@@ -140,7 +161,7 @@ export function PMaxChart({ symbol, botRunning }: Props) {
       if (pollRef.current) clearInterval(pollRef.current);
       chart.remove();
     };
-  }, []);
+  }, [theme]);
 
   // Fetch + render
   const fetchData = async () => {
@@ -151,7 +172,7 @@ export function PMaxChart({ symbol, botRunning }: Props) {
     if (!cs || !ps) return;
 
     try {
-      const res = await fetch(`${BASE}/api/chart-data?symbol=${symbol}&limit=1500`);
+      const res = await fetch(`${BASE}/api/chart-data?symbol=${symbol}&limit=1500&source=${mode}`);
       const data: ChartDataResponse = await res.json();
       if (data.error) return;
 
@@ -173,7 +194,7 @@ export function PMaxChart({ symbol, botRunning }: Props) {
       ps.setData(pmaxPts);
 
       const lastDir = data.candles[data.candles.length - 1]?.direction ?? 0;
-      ps.applyOptions({ color: lastDir === 1 ? "#22c55e" : "#ef4444" });
+      ps.applyOptions({ color: lastDir === 1 ? "#2dd4bf" : "#f43f5e" });
 
       // Keltner Channel bands
       if (ku) {
@@ -203,18 +224,18 @@ export function PMaxChart({ symbol, botRunning }: Props) {
           const isTP = gl.label === "TP";
           const isAvg = gl.label.startsWith("AVG");
 
-          let color = "#64748b";  // default slate
+          let color = "#475569";  // default slate
           let lineStyle = 2;     // dashed
           if (isStop) {
-            color = gl.filled ? "#dc2626" : "#dc262660";  // red if active, dim if not
-            lineStyle = 0;  // solid when active
+            color = gl.filled ? "#f43f5e" : "#f43f5e40";
+            lineStyle = 0;
           } else if (isDCA) {
-            color = "#22c55e90";  // green semi-transparent
+            color = "#2dd4bf60";
           } else if (isTP) {
-            color = "#3b82f690";  // blue semi-transparent
+            color = "#38bdf860";
           } else if (isAvg) {
-            color = "#f59e0b";    // amber for avg entry
-            lineStyle = 0;       // solid
+            color = "#fbbf24";
+            lineStyle = 2;       // dashed for avg
           }
 
           const pl = cs.createPriceLine({
@@ -229,9 +250,66 @@ export function PMaxChart({ symbol, botRunning }: Props) {
         }
       }
 
-      // Markers
-      if (data.markers.length > 0) {
-        const markers: SeriesMarker<Time>[] = data.markers.map((m) => ({
+      // Config flags
+      if (data.config_flags) {
+        setConfigFlags(data.config_flags);
+      }
+
+      // Markers — process based on mode
+      const allRawMarkers = [...data.markers];
+
+      // In live mode, dim past signals and add live trade markers
+      if (mode === "live") {
+        // Dim all dry-run/past markers (reduce opacity via color)
+        for (let i = 0; i < allRawMarkers.length; i++) {
+          const m = allRawMarkers[i];
+          allRawMarkers[i] = {
+            ...m,
+            color: m.color.length === 7 ? m.color + "40" : m.color,
+            text: m.text ? `[${m.text}]` : "",
+          };
+        }
+        // Append live trade markers from backend (bright, prominent)
+        const serverLiveMarkers = data.live_markers || [];
+        for (const lm of serverLiveMarkers) {
+          allRawMarkers.push(lm);
+        }
+        // Also append any prop-based live markers
+        if (liveMarkers && liveMarkers.length > 0) {
+          for (const lm of liveMarkers) {
+            allRawMarkers.push(lm);
+          }
+        }
+      }
+
+      if (allRawMarkers.length > 0) {
+        // Shorten TP labels: "TP +18.24" → "+18"
+        const shortenedMarkers = allRawMarkers.map((m) => {
+          let text = m.text;
+          if (text.startsWith("TP +") || text.startsWith("TP -")) {
+            const val = parseFloat(text.replace("TP ", ""));
+            text = val >= 0 ? `+${Math.round(val)}` : `${Math.round(val)}`;
+          }
+          return { ...m, text };
+        });
+
+        // Thin markers: skip TP markers that are too close in time (< 3 candles apart)
+        const MIN_GAP = 180 * 3; // 3 candles × 180s (3m)
+        const filtered: typeof shortenedMarkers = [];
+        let lastTpTime = 0;
+        for (const m of shortenedMarkers) {
+          const isTP = m.shape === "circle" && (m.text.startsWith("+") || m.text.startsWith("-") || m.text.startsWith("[+") || m.text.startsWith("[-"));
+          if (isTP && m.time - lastTpTime < MIN_GAP) {
+            continue;
+          }
+          if (isTP) lastTpTime = m.time;
+          filtered.push(m);
+        }
+
+        // Sort by time (required by lightweight-charts)
+        filtered.sort((a, b) => a.time - b.time);
+
+        const markers: SeriesMarker<Time>[] = filtered.map((m) => ({
           time: m.time as Time,
           position: m.position as "aboveBar" | "belowBar" | "inBar",
           color: m.color,
@@ -259,24 +337,26 @@ export function PMaxChart({ symbol, botRunning }: Props) {
   }, [symbol, botRunning]);
 
   return (
-    <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] shadow-[0_0_20px_rgba(59,130,246,0.04)] p-4">
-      <div className="flex items-center justify-between mb-2">
-        <h2 className="text-sm font-semibold text-slate-300">{symbol} - 3m PMax</h2>
-        <div className="flex items-center gap-3 text-[10px] text-slate-500">
+    <div className="bg-card rounded-2xl shadow-card p-5">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-xs font-semibold text-slate-300 tracking-tight">{title || `${symbol} - Trend Inventory`}</h2>
+        <div className="flex items-center gap-3 text-[9px] text-slate-500/60">
           <span className="flex items-center gap-1">
-            <span className="w-3 h-0.5 bg-[#22c55e] inline-block" /> PMax
+            <span className="w-3 h-0.5 bg-teal-400 inline-block rounded-full" /> Trend
           </span>
           <span className="flex items-center gap-1">
-            <span className="w-3 h-0.5 bg-[#f59e0b] inline-block opacity-50" /> KC
+            <span className="w-3 h-0.5 bg-amber-400/40 inline-block rounded-full" /> Channel
           </span>
-          <span className="text-emerald-400">&#9650; DCA</span>
-          <span className="text-blue-400">&#9679; TP</span>
-          <span className="text-amber-400">&#9632; REV</span>
-          <span className="text-red-600">&#9632; STOP</span>
+          <span className="text-teal-400/80">&#9650; DCA</span>
+          <span className="text-sky-400/80">&#9679; TP</span>
+          <span className="text-amber-400/80">&#9632; REV</span>
+          {configFlags.pct_stop_enabled && (
+            <span className="text-rose-400/80">&#9632; STOP</span>
+          )}
         </div>
       </div>
       {loading && (
-        <div className="text-slate-500 text-xs text-center py-4">Grafik yukleniyor...</div>
+        <div className="text-slate-500/60 text-xs text-center py-6">Grafik yukleniyor...</div>
       )}
       <div ref={containerRef} style={{ width: "100%", height: 500 }} />
     </div>

@@ -1,28 +1,68 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 60" fill="none">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 280 60" fill="none">
   <defs>
-    <linearGradient id="blueGrad" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#4A90D9"/>
-      <stop offset="100%" stop-color="#1a3a6b"/>
+    <!-- S letter: deep metallic blue gradient -->
+    <linearGradient id="sBlue" x1="0" y1="0" x2="0.3" y2="1">
+      <stop offset="0%" stop-color="#5a9ee0"/>
+      <stop offset="25%" stop-color="#2a6ab8"/>
+      <stop offset="50%" stop-color="#1a4a8a"/>
+      <stop offset="75%" stop-color="#2a6ab8"/>
+      <stop offset="100%" stop-color="#0d2d5a"/>
     </linearGradient>
-    <linearGradient id="silverGrad" x1="0" y1="0" x2="1" y2="1">
+    <linearGradient id="sHighlight" x1="0.3" y1="0" x2="0.7" y2="1">
+      <stop offset="0%" stop-color="#78b4ec"/>
+      <stop offset="50%" stop-color="#3a7acc"/>
+      <stop offset="100%" stop-color="#1a4a8a"/>
+    </linearGradient>
+    <!-- K letter: silver metallic gradient -->
+    <linearGradient id="kSilver" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#e8e8e8"/>
+      <stop offset="20%" stop-color="#b8b8b8"/>
+      <stop offset="40%" stop-color="#d8d8d8"/>
+      <stop offset="60%" stop-color="#a0a0a0"/>
+      <stop offset="80%" stop-color="#c8c8c8"/>
+      <stop offset="100%" stop-color="#909090"/>
+    </linearGradient>
+    <!-- Arrow: silver gradient -->
+    <linearGradient id="arrowGrad" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0%" stop-color="#a0a0a0"/>
+      <stop offset="40%" stop-color="#e8e8e8"/>
+      <stop offset="70%" stop-color="#c0c0c0"/>
+      <stop offset="100%" stop-color="#d0d0d0"/>
+    </linearGradient>
+    <!-- Sigma text gradient -->
+    <linearGradient id="sigmaGrad" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%" stop-color="#d0d0d0"/>
-      <stop offset="50%" stop-color="#f0f0f0"/>
-      <stop offset="100%" stop-color="#a0a0a0"/>
+      <stop offset="100%" stop-color="#808080"/>
     </linearGradient>
-    <linearGradient id="arrowGrad" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%" stop-color="#b0b0b0"/>
-      <stop offset="100%" stop-color="#e0e0e0"/>
+    <!-- Kapital text gradient -->
+    <linearGradient id="kapitalGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#4A90D9"/>
+      <stop offset="100%" stop-color="#1a4a8a"/>
     </linearGradient>
+    <!-- Subtle glow -->
+    <filter id="glow">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="1" result="blur"/>
+      <feFlood flood-color="#4A90D9" flood-opacity="0.15"/>
+      <feComposite in2="blur" operator="in"/>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
   </defs>
-  <!-- S letter -->
-  <text x="4" y="44" font-family="Arial Black, Arial, sans-serif" font-weight="900" font-size="40" fill="url(#blueGrad)" stroke="#1a3a6b" stroke-width="0.5">S</text>
-  <!-- K letter with arrow -->
-  <text x="28" y="44" font-family="Arial Black, Arial, sans-serif" font-weight="900" font-size="40" fill="url(#silverGrad)" stroke="#888" stroke-width="0.3">K</text>
-  <!-- Arrow going up-right from K -->
-  <line x1="48" y1="28" x2="62" y2="10" stroke="url(#arrowGrad)" stroke-width="3" stroke-linecap="round"/>
-  <polygon points="60,4 68,10 60,14" fill="url(#arrowGrad)"/>
+
+  <!-- S letter - bold metallic blue -->
+  <text x="2" y="46" font-family="'Arial Black', 'Impact', sans-serif" font-weight="900" font-size="48" fill="url(#sBlue)" stroke="#0d2d5a" stroke-width="0.8" filter="url(#glow)">S</text>
+  <!-- S inner highlight stroke -->
+  <text x="2" y="46" font-family="'Arial Black', 'Impact', sans-serif" font-weight="900" font-size="48" fill="none" stroke="url(#sHighlight)" stroke-width="0.3" opacity="0.5">S</text>
+
+  <!-- K letter - silver metallic -->
+  <text x="32" y="46" font-family="'Arial Black', 'Impact', sans-serif" font-weight="900" font-size="44" fill="url(#kSilver)" stroke="#707070" stroke-width="0.4">K</text>
+
+  <!-- Upward arrow from K arm -->
+  <line x1="56" y1="30" x2="72" y2="8" stroke="url(#arrowGrad)" stroke-width="4" stroke-linecap="round"/>
+  <polygon points="69,2 78,10 67,12" fill="url(#arrowGrad)" stroke="#999" stroke-width="0.3"/>
+
   <!-- SIGMA text -->
-  <text x="74" y="28" font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="18" fill="#c0c0c0" letter-spacing="2">SIGMA</text>
+  <text x="90" y="28" font-family="'Arial', 'Helvetica Neue', sans-serif" font-weight="800" font-size="22" fill="url(#sigmaGrad)" letter-spacing="3">SIGMA</text>
+
   <!-- KAPITAL text -->
-  <text x="74" y="48" font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="18" fill="#4A90D9" letter-spacing="2">KAPITAL</text>
+  <text x="90" y="50" font-family="'Arial', 'Helvetica Neue', sans-serif" font-weight="800" font-size="22" fill="url(#kapitalGrad)" letter-spacing="3">KAPITAL</text>
 </svg>

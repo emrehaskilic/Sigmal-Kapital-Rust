@@ -159,6 +159,19 @@ class LiveExecutor:
         self.total_pnl: float = 0.0
         self.total_fees: float = 0.0
 
+        # ── WS Fill Detection (idempotency + order tracking) ──
+        # Processed order IDs — idempotency guard (bounded to last 2000)
+        self._processed_order_ids: set[int] = set()
+        # Order ID → (pos_key, order_type) mapping
+        # Every placed order is registered here. WS fill events match by this map.
+        # Old IDs stay after cancel+replace → late WS events still match.
+        self._order_id_map: dict[int, tuple[str, str]] = {}
+        # WS connection health (for watchdog)
+        self._ws_connected: bool = False
+        self._ws_last_event_ts: float = 0.0
+        # Fill event log (for debug endpoint, last 50)
+        self._fill_log: list[dict] = []
+
     @staticmethod
     def _pos_key(symbol: str, tf_label: str) -> str:
         return f"{symbol}:{tf_label}" if tf_label else symbol
@@ -188,12 +201,8 @@ class LiveExecutor:
         except Exception as e:
             logger.error("[SETUP] Failed to set leverage for %s: %s", symbol, e)
 
-        # Set margin type to ISOLATED
-        try:
-            self._client.set_margin_type(symbol, "ISOLATED")
-            logger.info("[SETUP] %s margin type set to ISOLATED", symbol)
-        except Exception as e:
-            logger.warning("[SETUP] Margin type for %s: %s", symbol, e)
+        # Margin type: borsadaki mevcut ayari koru (CROSS/ISOLATED degistirme)
+        # Stop korumalari kapali oldugu icin CROSS daha guvenli (likidasyon daha uzak)
 
     def refresh_balance(self) -> dict[str, float]:
         """Fetch latest USDT balance from Binance."""
@@ -212,6 +221,88 @@ class LiveExecutor:
         Does NOT create PositionState — just returns raw data for display.
         """
         return self._client.get_positions()
+
+    def recover_from_exchange(self, tf_label: str = "3m") -> list[str]:
+        """Recover position state from exchange after bot restart.
+
+        Reads open positions and pending orders from Binance,
+        reconstructs PositionState, and populates _order_id_map.
+        Returns list of recovery messages.
+        """
+        msgs: list[str] = []
+        try:
+            positions = self._client.get_positions()
+        except Exception as e:
+            msgs.append(f"[RECOVERY] Failed to fetch positions: {e}")
+            return msgs
+
+        for ep in positions:
+            symbol = ep["symbol"]
+            side = ep["side"]
+            amount = ep["amount"]
+            entry_price = ep["entry_price"]
+            leverage = ep["leverage"]
+
+            key = self._pos_key(symbol, tf_label)
+            if key in self._positions and self._positions[key].condition != 0.0:
+                # Already tracked — just sync qty
+                self._position_qty[key] = amount
+                continue
+
+            # Reconstruct PositionState
+            pc = self._pair_configs.get(symbol)
+            if not pc:
+                msgs.append(f"[RECOVERY] {symbol}: no pair config, skipping")
+                continue
+
+            risk_mgr = self._get_risk_mgr(tf_label)
+            pos = risk_mgr.open_position(
+                symbol, side, entry_price, 0.0,
+                margin_per_trade=pc.margin, leverage=leverage,
+            )
+            pos.entry_time = int(time.time() * 1000)
+            self._positions[key] = pos
+            self._position_qty[key] = amount
+            self._tf_labels[key] = tf_label
+            self._pair_states[symbol] = PairState.ACTIVE
+
+            msgs.append(f"[RECOVERY] {symbol} {side} reconstructed: qty={amount} entry={entry_price}")
+            logger.info("[RECOVERY] %s %s reconstructed: qty=%.6f entry=%.4f",
+                        symbol, side, amount, entry_price)
+
+        # Load pending orders into _order_id_map
+        for symbol in list(self._pair_configs.keys()):
+            try:
+                open_orders = self._client.get_open_orders(symbol)
+                for o in open_orders:
+                    oid = o.get("orderId", 0)
+                    if oid <= 0:
+                        continue
+                    key = self._pos_key(symbol, tf_label)
+                    reduce_only = o.get("reduceOnly", False)
+                    order_type_str = o.get("type", "")
+
+                    if order_type_str == "STOP_MARKET":
+                        self._order_id_map[oid] = (key, "SL")
+                        self._sl_order_ids[key] = oid
+                    elif reduce_only:
+                        self._order_id_map[oid] = (key, "TP")
+                        pos = self._positions.get(key)
+                        if pos:
+                            pos.tp_order_id = oid
+                            pos.pending_tp_price = float(o.get("price", 0))
+                    else:
+                        self._order_id_map[oid] = (key, "DCA")
+                        pos = self._positions.get(key)
+                        if pos:
+                            pos.pending_dca_order_id = oid
+                            pos.pending_dca_price = float(o.get("price", 0))
+
+                    msgs.append(f"[RECOVERY] {symbol}: order #{oid} mapped as {self._order_id_map[oid][1]}")
+            except Exception as e:
+                msgs.append(f"[RECOVERY] Failed to load orders for {symbol}: {e}")
+
+        return msgs
 
     def has_position(self, symbol: str, tf_label: str = "") -> bool:
         key = self._pos_key(symbol, tf_label)
@@ -356,7 +447,7 @@ class LiveExecutor:
         for ep in exchange_positions:
             exchange_map[ep["symbol"]] = ep
 
-        # Check bot positions against exchange
+        # Check bot positions against exchange + sync _position_qty
         for key in list(self._positions.keys()):
             pos = self._positions[key]
             if pos.condition == 0.0:
@@ -364,6 +455,17 @@ class LiveExecutor:
 
             symbol = pos.symbol
             tf_label = self._tf_labels.get(key, "")
+
+            # Sync _position_qty with exchange qty
+            if symbol in exchange_map:
+                exchange_qty = exchange_map[symbol]["amount"]
+                tracked_qty = self._position_qty.get(key, 0)
+                if abs(exchange_qty - tracked_qty) > 0.001 * max(exchange_qty, 1):
+                    logger.info(
+                        "[SYNC_QTY] %s [%s]: tracked=%.6f exchange=%.6f — correcting",
+                        symbol, tf_label, tracked_qty, exchange_qty,
+                    )
+                    self._position_qty[key] = exchange_qty
 
             if symbol not in exchange_map:
                 msg = (
@@ -373,19 +475,65 @@ class LiveExecutor:
                 logger.warning(msg)
                 warnings.append(msg)
 
+                # Cancel ALL orphan orders for this symbol (SL, DCA, TP)
                 old_sl = self._sl_order_ids.get(key)
                 if old_sl:
                     try:
                         self._client.cancel_order(symbol, old_sl)
                     except Exception:
                         pass
+                if pos.pending_dca_order_id > 0:
+                    try:
+                        self._client.cancel_order(symbol, pos.pending_dca_order_id)
+                        logger.info("[SYNC_CLEANUP] Cancelled orphan DCA order %d for %s", pos.pending_dca_order_id, symbol)
+                    except Exception:
+                        pass
+                    pos.pending_dca_order_id = 0
+                if pos.tp_order_id > 0:
+                    try:
+                        self._client.cancel_order(symbol, pos.tp_order_id)
+                        logger.info("[SYNC_CLEANUP] Cancelled orphan TP order %d for %s", pos.tp_order_id, symbol)
+                    except Exception:
+                        pass
+                    pos.tp_order_id = 0
 
                 pos.condition = 0.0
                 pos.remaining_qty = 0.0
                 self._position_qty.pop(key, None)
                 self._sl_order_ids.pop(key, None)
 
-        # Check 5: Verify SL orders still exist on exchange
+        # Check 5: Verify pending DCA/TP orders still exist on exchange
+        for key in list(self._positions.keys()):
+            pos = self._positions[key]
+            if pos.condition == 0.0:
+                continue
+            symbol = pos.symbol
+            # Verify DCA order
+            if pos.pending_dca_order_id > 0:
+                try:
+                    order = self._client.get_order(symbol, pos.pending_dca_order_id)
+                    status = order.get("status", "")
+                    if status in ("CANCELED", "EXPIRED", "REJECTED"):
+                        msg = f"[SYNC] {symbol}: DCA order {pos.pending_dca_order_id} is {status} — clearing"
+                        logger.warning(msg)
+                        warnings.append(msg)
+                        pos.pending_dca_order_id = 0
+                except Exception:
+                    pass
+            # Verify TP order
+            if getattr(pos, 'tp_order_id', 0) > 0:
+                try:
+                    order = self._client.get_order(symbol, pos.tp_order_id)
+                    status = order.get("status", "")
+                    if status in ("CANCELED", "EXPIRED", "REJECTED"):
+                        msg = f"[SYNC] {symbol}: TP order {pos.tp_order_id} is {status} — clearing"
+                        logger.warning(msg)
+                        warnings.append(msg)
+                        pos.tp_order_id = 0
+                except Exception:
+                    pass
+
+        # Check 6: Verify SL orders still exist on exchange
         for key, sl_id in list(self._sl_order_ids.items()):
             pos = self._positions.get(key)
             if not pos or pos.condition == 0.0:
@@ -417,6 +565,51 @@ class LiveExecutor:
             self.sync_warnings.extend(warnings)
             # Keep last 50 warnings
             self.sync_warnings = self.sync_warnings[-50:]
+
+        # ── WS Health Check ──
+        if self._ws_connected and time.time() - self._ws_last_event_ts > 300:
+            msg = "[WATCHDOG] WS silent for 5min — triggering catch-up poll"
+            logger.warning(msg)
+            warnings.append(msg)
+            self._ws_connected = False
+            self._catchup_poll_all_orders()
+
+        # ── Dust position cleanup ──
+        for key in list(self._positions.keys()):
+            pos = self._positions[key]
+            if pos.condition == 0.0:
+                continue
+            qty = self._position_qty.get(key, 0)
+            if qty > 0 and qty * (pos.average_entry_price or 1) < 10.0:  # < $10 notional = dust
+                logger.info("[SYNC_DUST] %s qty=%.6f — closing dust position", pos.symbol, qty)
+                # Cancel orders FIRST (before marking closed, so no new fills sneak in)
+                self._cancel_all_grid_orders(key, pos)
+                pos.condition = 0.0
+                pos.remaining_qty = 0.0
+                pos.pending_dca_order_id = 0
+                pos.tp_order_id = 0
+                self._position_qty[key] = 0
+                warnings.append(f"[SYNC] {pos.symbol}: dust position closed (qty={qty})")
+
+        # ── Invariant check on all open positions ──
+        for key in list(self._positions.keys()):
+            pos = self._positions[key]
+            if pos.condition == 0.0:
+                continue
+            tf_label = self._tf_labels.get(key, "")
+            risk_mgr = self._get_risk_mgr(tf_label)
+            if pos.dca_fills_count > risk_mgr._max_dca_steps:
+                msg = f"[WATCHDOG] {pos.symbol}: dca_count={pos.dca_fills_count} > max={risk_mgr._max_dca_steps}!"
+                logger.critical(msg)
+                warnings.append(msg)
+                self.circuit_breaker_triggered = True
+                self.circuit_breaker_reason = msg
+
+        # ── Bound _order_id_map (prevent memory leak) ──
+        if len(self._order_id_map) > 5000:
+            # Keep only recent entries
+            recent = dict(list(self._order_id_map.items())[-2000:])
+            self._order_id_map = recent
 
         # Also refresh balance during sync
         try:
@@ -462,9 +655,12 @@ class LiveExecutor:
                 return closed_trades  # same direction — no pyramiding
             # Opposite direction — close existing (reversal within same TF)
             closed_trades.extend(self._close_position(key, signal.price))
+            # Verify close succeeded — if position still open, don't open opposite
+            if self.has_position(symbol, tf_label):
+                logger.error("[REVERSAL] Failed to close %s %s — aborting new entry", symbol, existing.side)
+                return closed_trades
 
-        # ── Account protection checks ──
-        self.refresh_balance()
+        # ── Account protection checks (balance should be pre-refreshed by caller) ──
         block_reason = self._check_account_protection(symbol)
         if block_reason:
             logger.warning("[SIGNAL] Blocked for %s [%s]: %s", symbol, tf_label, block_reason)
@@ -497,6 +693,11 @@ class LiveExecutor:
         order_side = "BUY" if signal.side == "LONG" else "SELL"
         try:
             result = self._client.market_order(symbol, order_side, qty)
+            # Register IMMEDIATELY — before verify, so WS event doesn't race
+            entry_order_id = result.get("orderId", 0)
+            if entry_order_id > 0:
+                self._order_id_map[entry_order_id] = (key, "ENTRY")
+                self._processed_order_ids.add(entry_order_id)
             fill_price = self._verify_fill(symbol, result, signal.price)
         except Exception as e:
             logger.error("[ORDER] Market order failed for %s [%s]: %s", symbol, tf_label, e)
@@ -525,9 +726,8 @@ class LiveExecutor:
             symbol, signal.side, tf_label, fill_price, qty, notional, size_mult,
         )
 
-        # Place DCA + TP LIMIT orders on exchange
-        self._place_dca_orders(key, pos)
-        self._place_tp_order(key, pos)
+        # Backtest parity: entry candle'da DCA/TP konulmuyor.
+        # pending_dca_price=0, pending_tp_price=0 — sonraki candle KC update yapacak.
 
         return closed_trades
 
@@ -549,26 +749,37 @@ class LiveExecutor:
         # KILL SWITCH: Cancel ALL grid orders BEFORE closing position
         self._cancel_all_grid_orders(key, pos)
 
-        # Place market close order + verify fill
+        # Place market close order + verify fill — use real exchange qty
         close_side = "SELL" if pos.side == "LONG" else "BUY"
-        actual_qty = qty * pos.remaining_qty
+        # Get actual qty from exchange to avoid mismatch after DCA
+        try:
+            exchange_positions = self._client.get_positions()
+            for ep in exchange_positions:
+                if ep["symbol"] == symbol:
+                    actual_qty = ep["amount"]
+                    break
+            else:
+                actual_qty = qty * pos.remaining_qty
+        except Exception:
+            actual_qty = qty * pos.remaining_qty
         try:
             result = self._client.market_order(symbol, close_side, actual_qty, reduce_only=True)
             fill_price = self._verify_fill(symbol, result, exit_price)
         except Exception as e:
-            logger.error("[CLOSE] Market close failed for %s [%s]: %s", symbol, tf_label, e)
-            fill_price = exit_price
+            logger.error("[CLOSE] Market close failed for %s [%s]: %s — position NOT closed", symbol, tf_label, e)
+            return []  # DON'T mark as closed — let sync detect
 
         # Record trade
         self._trade_counter += 1
         size_mult = self._size_multipliers.get(key, 1.0)
         pc = self._pair_configs.get(symbol)
-        notional = (pc.margin * size_mult * pc.leverage * pos.remaining_qty) if pc else actual_qty * fill_price
+        notional = actual_qty * pos.average_entry_price if actual_qty > 0 else (pc.margin * size_mult * pc.leverage * pos.remaining_qty if pc else 0)
 
+        avg_entry = pos.average_entry_price if pos.average_entry_price > 0 else (pos.entry_price if pos.entry_price > 0 else fill_price)
         if pos.side == "LONG":
-            pnl_pct = (fill_price - pos.entry_price) / pos.entry_price * 100
+            pnl_pct = (fill_price - avg_entry) / avg_entry * 100 if avg_entry > 0 else 0
         else:
-            pnl_pct = (pos.entry_price - fill_price) / pos.entry_price * 100
+            pnl_pct = (avg_entry - fill_price) / avg_entry * 100 if avg_entry > 0 else 0
 
         pnl_usdt = notional * pnl_pct / 100
         exit_fee = actual_qty * fill_price * self._taker_fee  # market close = taker
@@ -607,29 +818,57 @@ class LiveExecutor:
         return [trade]
 
     def _place_dca_orders(self, key: str, pos: PositionState) -> None:
-        """Place DCA LIMIT order at pending KC level (if any).
+        """Place DCA LIMIT order at pending KC level.
 
-        In the KC-based approach, DCA price is set by pending_dca_price
-        which gets updated each candle from Keltner Channel bands.
+        Fill detection is handled by WS User Data Stream (process_order_fill).
+        This method only: cancel old → place new → handle immediate fill.
         """
         symbol = pos.symbol
         pc = self._pair_configs.get(symbol)
         if not pc or pos.pending_dca_price <= 0:
             return
 
+        # Don't place DCA on dust positions
+        current_qty = self._position_qty.get(key, 0)
+        if current_qty > 0 and current_qty * pos.pending_dca_price < 10.0:
+            return
+
         risk_mgr = self._get_risk_mgr(self._tf_labels.get(key, ""))
         if pos.dca_fills_count >= risk_mgr._max_dca_steps:
             return  # max DCA reached
 
+        # Cancel existing DCA order — verify cancel succeeded
         if pos.pending_dca_order_id > 0:
-            return  # already placed
+            old_id = pos.pending_dca_order_id
+            try:
+                cancel_result = self._client.cancel_order(symbol, old_id)
+                # Cancel succeeded — safe to clear
+                pos.pending_dca_order_id = 0
+            except Exception:
+                # Cancel failed — order may have filled or network error
+                # Check status before clearing
+                try:
+                    order = self._client.get_order(symbol, old_id)
+                    status = order.get("status", "")
+                    if status == "FILLED":
+                        # Order filled before cancel — process directly (no recursion)
+                        fill_p = float(order.get("avgPrice", 0))
+                        fill_q = float(order.get("executedQty", 0))
+                        if old_id not in self._processed_order_ids:
+                            self._processed_order_ids.add(old_id)
+                            self._process_dca_fill_live(key, pos, fill_p, fill_q, old_id,
+                                                         place_next_orders=False)
+                    pos.pending_dca_order_id = 0
+                except Exception:
+                    pos.pending_dca_order_id = 0  # Clear anyway, WS will catch if filled
 
-        # Use dynamic comp for DCA margin
+        # Calculate DCA margin with graduated multiplier
+        dca_mult = risk_mgr.get_dca_multiplier(pos.dca_fills_count)
         if self._dyncomp_enabled and self._dyncomp_tiers:
             comp_pct = get_dynamic_comp_pct(self.balance, self._dyncomp_tiers)
-            dca_margin = calc_step_margin(self.balance, comp_pct)
+            dca_margin = calc_step_margin(self.balance, comp_pct) * dca_mult
         else:
-            dca_margin = pos.margin_per_step
+            dca_margin = pos.margin_per_step * dca_mult
 
         order_side = "BUY" if pos.side == "LONG" else "SELL"
         qty = self._client.calc_quantity(symbol, dca_margin, pos.leverage, pos.pending_dca_price)
@@ -637,28 +876,116 @@ class LiveExecutor:
             return
         try:
             price = self._client.calc_price(symbol, pos.pending_dca_price)
+            import math
+            info = self._client.get_symbol_info(symbol)
+            step_size = 0.001
+            for f in info.get("filters", []):
+                if f.get("filterType") == "LOT_SIZE":
+                    step_size = float(f.get("stepSize", 0.001))
+                    break
+            qty = math.floor(qty / step_size) * step_size
+            if qty <= 0:
+                return
+
             result = self._client.limit_order(symbol, order_side, qty, price)
-            pos.pending_dca_order_id = result.get("orderId", 0)
-            logger.info("[DCA_PLACED] %s %s qty=%.6f @ %.4f orderId=%s",
-                        symbol, order_side, qty, price, pos.pending_dca_order_id)
+            order_id = result.get("orderId", 0)
+            order_status = result.get("status", "")
+
+            # Register in order_id_map (WS fill events match from this map)
+            if order_id > 0:
+                self._order_id_map[order_id] = (key, "DCA")
+
+            logger.info("[DCA_PLACED] %s %s qty=%.6f @ %.6f mult=%.2f orderId=%s status=%s",
+                        symbol, order_side, qty, price, dca_mult, order_id, order_status)
+
+            # Handle IMMEDIATE fill — max 1 DCA per cycle (matches backtest behavior)
+            # Backtest: each candle max 1 DCA (if block, not while loop)
+            # Next DCA will be placed on next candle's KC update
+            if order_status == "FILLED":
+                self._processed_order_ids.add(order_id)
+                fill_price = float(result.get("avgPrice", price))
+                fill_qty = float(result.get("executedQty", qty))
+                self._process_dca_fill_live(key, pos, fill_price, fill_qty, order_id,
+                                             place_next_orders=False)
+                # Update TP for new position size
+                self._place_tp_order(key, pos)
+                # Do NOT place next DCA here — wait for next candle (backtest parity)
+                pos.pending_dca_order_id = 0
+            else:
+                pos.pending_dca_order_id = order_id
         except Exception as e:
-            logger.error("[DCA_ORDER] Failed for %s: %s", symbol, e)
+            logger.error("[DCA_ORDER] Failed for %s: qty=%.6f price=%.6f err=%s",
+                         symbol, qty, pos.pending_dca_price, e)
+            pos.pending_dca_order_id = 0
 
     def _place_tp_order(self, key: str, pos: PositionState) -> None:
-        """Place TP LIMIT order on exchange."""
+        """Place TP LIMIT order on exchange.
+
+        Fill detection is handled by WS User Data Stream (process_order_fill).
+        This method only: cancel old → place new → handle immediate fill.
+
+        TP only placed when dca_fills_count > 0 (matches backtest behavior).
+        At dca_count=0, position waits for DCA fill before TP is set.
+        """
+        symbol = pos.symbol
         tp_price = pos.pending_tp_price or pos.tp_price
         if tp_price <= 0 or pos.condition == 0.0:
             return
 
-        symbol = pos.symbol
-        total_qty = self._position_qty.get(key, 0)
-        if total_qty <= 0:
+        # No TP at dca_count=0 — backtest behavior: TP only after DCA fill
+        if pos.dca_fills_count <= 0:
             return
 
-        # Use tp_close_pct from risk manager config (default 5%)
+        # Cancel existing TP order — verify cancel succeeded
+        if pos.tp_order_id > 0:
+            old_id = pos.tp_order_id
+            try:
+                self._client.cancel_order(symbol, old_id)
+                pos.tp_order_id = 0
+            except Exception:
+                try:
+                    order = self._client.get_order(symbol, old_id)
+                    status = order.get("status", "")
+                    if status == "FILLED":
+                        fill_p = float(order.get("avgPrice", 0))
+                        fill_q = float(order.get("executedQty", 0))
+                        if old_id not in self._processed_order_ids:
+                            self._processed_order_ids.add(old_id)
+                            self._process_tp_fill_live(key, pos, fill_p, fill_q, old_id,
+                                                        place_next_orders=False)
+                    pos.tp_order_id = 0
+                except Exception:
+                    pos.tp_order_id = 0
+
+        # Use _position_qty (synced from exchange after every fill)
+        # Don't re-query exchange here — sync may be more recent than a fresh query
+        # (Binance position update can lag behind order fill by a few hundred ms)
+        actual_qty = self._position_qty.get(key, 0)
+        if actual_qty <= 0:
+            logger.warning("[TP_ORDER] %s: no position qty found (internal=%s, exchange=0)",
+                          symbol, self._position_qty.get(key, 0))
+            return
+
+        # Use graduated tp_close_pct based on DCA fills
         risk_mgr = self._get_risk_mgr(self._tf_labels.get(key, ""))
-        tp_pct = risk_mgr._tp_close_pct
-        tp_qty = total_qty * pos.remaining_qty * tp_pct
+        tp_pct = risk_mgr.get_tp_close_pct(pos.dca_fills_count)
+        tp_qty = actual_qty * tp_pct
+        if tp_qty <= 0:
+            return
+
+        # Round qty to symbol's stepSize
+        import math
+        info = self._client.get_symbol_info(symbol)
+        step_size = 1.0
+        for f in info.get("filters", []):
+            if f.get("filterType") == "LOT_SIZE":
+                step_size = float(f.get("stepSize", 1))
+                break
+        if step_size > 0:
+            tp_qty = math.floor(tp_qty / step_size) * step_size
+        else:
+            qty_precision = info.get("quantityPrecision", 0)
+            tp_qty = round(tp_qty, qty_precision)
         if tp_qty <= 0:
             return
 
@@ -666,11 +993,23 @@ class LiveExecutor:
         try:
             price = self._client.calc_price(symbol, tp_price)
             result = self._client.limit_order(symbol, close_side, tp_qty, price, reduce_only=True)
-            pos.tp_order_id = result.get("orderId", 0)
-            logger.info("[TP_PLACED] %s %s qty=%.6f @ %.4f orderId=%s (%.0f%%)",
-                        symbol, close_side, tp_qty, price, pos.tp_order_id, tp_pct * 100)
+            order_id = result.get("orderId", 0)
+            order_status = result.get("status", "")
+
+            # Register in order_id_map (WS fill events match from this map)
+            if order_id > 0:
+                self._order_id_map[order_id] = (key, "TP")
+
+            logger.info("[TP_PLACED] %s %s qty=%.6f @ %.4f orderId=%s (%.0f%%) exchange_qty=%.6f status=%s",
+                        symbol, close_side, tp_qty, price, order_id, tp_pct * 100, actual_qty, order_status)
+
+            # Do NOT handle immediate fill here — backtest parity
+            # If TP fills instantly (marketable limit), WS event will detect it
+            # on the next cycle. This matches backtest elif behavior:
+            # DCA candle does not process TP, even if price touched KC upper.
+            pos.tp_order_id = order_id
         except Exception as e:
-            logger.error("[TP_ORDER] Failed for %s: %s", symbol, e)
+            logger.error("[TP_ORDER] Failed for %s: qty=%.6f price=%.4f err=%s", symbol, tp_qty, tp_price, e)
 
     def _place_sl_order(self, symbol: str, pos: PositionState, qty: float) -> None:
         """Place hard stop as STOP_MARKET order on exchange."""
@@ -691,6 +1030,9 @@ class LiveExecutor:
             order_id = result.get("orderId", 0)
             if key:
                 self._sl_order_ids[key] = order_id
+                # Register in order_id_map for WS fill detection
+                if order_id > 0:
+                    self._order_id_map[order_id] = (key, "SL")
             logger.info(
                 "[SL_PLACED] %s %s qty=%.6f stop=%.4f orderId=%s",
                 symbol, close_side, qty, pos.hard_stop_price, order_id,
@@ -702,7 +1044,16 @@ class LiveExecutor:
         """Cancel ALL open DCA + TP limit orders for this position (kill switch cleanup)."""
         symbol = pos.symbol
 
-        # Cancel DCA orders
+        # Cancel pending DCA order (KC-based approach)
+        if pos.pending_dca_order_id > 0:
+            try:
+                self._client.cancel_order(symbol, pos.pending_dca_order_id)
+                logger.info("[CANCEL_DCA] %s pending orderId=%d", symbol, pos.pending_dca_order_id)
+            except Exception:
+                pass
+            pos.pending_dca_order_id = 0
+
+        # Cancel legacy DCA orders (grid-based approach)
         for dca in pos.dca_levels:
             if dca.order_id > 0 and not dca.filled:
                 try:
@@ -720,6 +1071,13 @@ class LiveExecutor:
             except Exception:
                 pass
             pos.tp_order_id = 0
+
+        # Fallback: cancel ALL open orders on exchange for this symbol
+        try:
+            self._client.cancel_all_orders(symbol)
+            logger.info("[CANCEL_ALL] %s — all exchange orders cancelled", symbol)
+        except Exception:
+            pass
 
     def process_candle(self, symbol: str, high: float, low: float, close_time: int,
                        tf_label: str = "", candle_close: float = 0.0,
@@ -792,78 +1150,358 @@ class LiveExecutor:
                 completed.extend(trades)
                 continue
 
-            # 1. Check Keltner DCA/TP signals using candle H/L vs pending prices
-            # DCA check: candle touches pending DCA level
-            dca_filled = False
-            if pos.dca_fills_count < risk_mgr._max_dca_steps and pos.pending_dca_price > 0:
-                dca_hit = False
-                if pos.side == "LONG" and low <= pos.pending_dca_price:
-                    dca_hit = True
-                elif pos.side == "SHORT" and high >= pos.pending_dca_price:
-                    dca_hit = True
-
-                if dca_hit:
-                    # Use dynamic comp for DCA margin
-                    if self._dyncomp_enabled and self._dyncomp_tiers:
-                        comp_pct = get_dynamic_comp_pct(self.balance, self._dyncomp_tiers)
-                        dca_margin = calc_step_margin(self.balance, comp_pct)
-                    else:
-                        dca_margin = pos.margin_per_step
-                    pos.margin_per_step = dca_margin
-
-                    risk_mgr.process_dca_fill(pos, pos.pending_dca_price)
-                    # Recalculate hard stop after DCA
-                    if pos.entry_atr > 0:
-                        risk_mgr.update_hard_stop(pos, pos.entry_atr)
-                    entry_fee = dca_margin * pos.leverage * self._maker_fee
-                    self.total_fees += entry_fee
-                    dca_filled = True
-
-            # 2. TP check: candle touches pending TP level (only if DCA filled)
-            if not dca_filled and pos.dca_fills_count > 0 and pos.pending_tp_price > 0:
-                tp_hit = False
-                if pos.side == "LONG" and high >= pos.pending_tp_price:
-                    tp_hit = True
-                elif pos.side == "SHORT" and low <= pos.pending_tp_price:
-                    tp_hit = True
-
-                if tp_hit:
-                    tp_fill_price = pos.pending_tp_price
-                    avg_before = pos.average_entry_price
-                    closed_notional = risk_mgr.process_tp_fill(pos, tp_fill_price)
-                    if closed_notional > 0:
-                        self._trade_counter += 1
-
-                        if pos.side == "LONG":
-                            pnl_pct = (tp_fill_price - avg_before) / avg_before * 100
-                        else:
-                            pnl_pct = (avg_before - tp_fill_price) / avg_before * 100
-
-                        pnl_usdt = closed_notional * pnl_pct / 100
-                        tp_fee = closed_notional * self._maker_fee
-
-                        self._update_stats(pnl_usdt, tp_fee)
-
-                        trade = LiveTrade(
-                            id=self._trade_counter,
-                            symbol=pos.symbol,
-                            side=pos.side,
-                            entry_price=avg_before,
-                            entry_time=pos.entry_time,
-                            exit_price=tp_fill_price,
-                            exit_time=close_time,
-                            exit_reason="TP",
-                            qty=0,
-                            qty_usdt=round(closed_notional, 2),
-                            leverage=pos.leverage,
-                            pnl_usdt=round(pnl_usdt, 4),
-                            pnl_percent=round(pnl_pct, 4),
-                            fee_usdt=round(tp_fee, 4),
-                        )
-                        completed.append(trade)
-                        self.trades.append(trade)
+            # DCA/TP fill detection REMOVED — handled by WS User Data Stream
+            # (process_order_fill is the single source of truth for fills)
 
         return completed
+
+    # ------------------------------------------------------------------
+    # WS Fill Processing — Single Source of Truth
+    # ------------------------------------------------------------------
+
+    def process_order_fill(self, order_data: dict) -> list[LiveTrade]:
+        """WS ORDER_TRADE_UPDATE handler. SINGLE ENTRY POINT for all fills.
+
+        Idempotent: safe to call multiple times for the same orderId.
+        Called from WS callback, immediate fill handling, and catch-up poll.
+
+        order_data: {orderId, symbol, avgPrice, executedQty, ...}
+        Returns: list of completed LiveTrade (for TP/SL exits)
+        """
+        order_id = order_data.get("orderId", 0)
+        if order_id <= 0:
+            return []
+
+        # Idempotency guard
+        if order_id in self._processed_order_ids:
+            return []
+        self._processed_order_ids.add(order_id)
+        # Bound the set — remove IDs older than 24h by keeping only recent ones
+        # Use simple size cap: if >5000, clear all but keep last 2000 by ID value
+        # (higher order IDs are newer on Binance)
+        if len(self._processed_order_ids) > 5000:
+            keep = set(sorted(self._processed_order_ids)[-2000:])
+            self._processed_order_ids = keep
+
+        # WS health tracking
+        self._ws_last_event_ts = time.time()
+
+        # Lookup: which position's order is this?
+        mapping = self._order_id_map.get(order_id)
+        if not mapping:
+            logger.debug("[FILL_SKIP] orderId=%d not in order_id_map (may be manual)", order_id)
+            return []
+
+        pos_key, order_type = mapping
+        pos = self._positions.get(pos_key)
+        if not pos or pos.condition == 0.0:
+            logger.warning("[FILL_STALE] orderId=%d pos_key=%s — position closed/gone", order_id, pos_key)
+            return []
+
+        fill_price = float(order_data.get("avgPrice", 0) or 0)
+        fill_qty = float(order_data.get("executedQty", 0) or 0)
+
+        # Guard: invalid fill data
+        if fill_price <= 0 or fill_qty <= 0:
+            logger.error("[FILL_INVALID] orderId=%d price=%.4f qty=%.6f — skipping",
+                         order_id, fill_price, fill_qty)
+            return []
+
+        trades: list[LiveTrade] = []
+        if order_type == "DCA":
+            self._process_dca_fill_live(pos_key, pos, fill_price, fill_qty, order_id)
+        elif order_type == "TP":
+            trades = self._process_tp_fill_live(pos_key, pos, fill_price, fill_qty, order_id)
+        elif order_type == "SL":
+            trades = self._process_sl_fill_live(pos_key, pos, fill_price, fill_qty, order_id)
+        elif order_type == "ENTRY":
+            pass  # Entry already handled by process_signal
+
+        # Fill log (debug endpoint)
+        self._fill_log.append({
+            "time": time.strftime("%H:%M:%S"),
+            "orderId": order_id,
+            "symbol": order_data.get("symbol", pos.symbol),
+            "type": order_type,
+            "price": fill_price,
+            "qty": fill_qty,
+            "dca_count": pos.dca_fills_count,
+            "bot_qty": self._position_qty.get(pos_key, 0),
+        })
+        if len(self._fill_log) > 50:
+            self._fill_log = self._fill_log[-50:]
+
+        # Invariant assertion
+        self._assert_invariants(pos_key, pos)
+
+        return trades
+
+    def _process_dca_fill_live(self, key: str, pos: PositionState,
+                                fill_price: float, fill_qty: float, order_id: int,
+                                place_next_orders: bool = True) -> None:
+        """Process confirmed DCA fill. Updates state + syncs qty.
+
+        place_next_orders=False when called from immediate fill (prevents recursion).
+        """
+        tf_label = self._tf_labels.get(key, "")
+        risk_mgr = self._get_risk_mgr(tf_label)
+
+        # Dynamic comp margin
+        if self._dyncomp_enabled and self._dyncomp_tiers:
+            comp_pct = get_dynamic_comp_pct(self.balance, self._dyncomp_tiers)
+            dca_margin = calc_step_margin(self.balance, comp_pct)
+        else:
+            dca_margin = pos.margin_per_step
+        pos.margin_per_step = dca_margin
+
+        risk_mgr.process_dca_fill(pos, fill_price)
+        if pos.entry_atr > 0:
+            risk_mgr.update_hard_stop(pos, pos.entry_atr)
+
+        self.total_fees += fill_qty * fill_price * self._maker_fee
+        pos.pending_dca_order_id = 0
+        # Update qty: add fill_qty immediately, then try exchange sync
+        self._position_qty[key] = self._position_qty.get(key, 0) + fill_qty
+        self._sync_position_qty(key, pos)
+
+        logger.info("[DCA_FILL] %s #%d @ %.4f qty=%.6f | dca=%d/%d | bot_qty=%.6f",
+                    pos.symbol, order_id, fill_price, fill_qty,
+                    pos.dca_fills_count, risk_mgr._max_dca_steps,
+                    self._position_qty.get(key, 0))
+
+        if place_next_orders:
+            # Place TP for new position size (order must be on exchange)
+            self._place_tp_order(key, pos)
+            # Do NOT place next DCA here — wait for next candle KC update
+            # Backtest parity: each candle max 1 DCA (if block, not loop)
+
+    def _process_tp_fill_live(self, key: str, pos: PositionState,
+                               fill_price: float, fill_qty: float,
+                               order_id: int,
+                               place_next_orders: bool = True) -> list[LiveTrade]:
+        """Process confirmed TP fill. Updates state + records trade.
+
+        place_next_orders=False when called from immediate fill (prevents recursion).
+        """
+        tf_label = self._tf_labels.get(key, "")
+        risk_mgr = self._get_risk_mgr(tf_label)
+        trades: list[LiveTrade] = []
+
+        avg_before = pos.average_entry_price if pos.average_entry_price > 0 else fill_price
+        closed_notional = risk_mgr.process_tp_fill(pos, fill_price)
+        pnl_usdt = 0.0
+        pnl_pct = 0.0
+
+        if closed_notional > 0:
+            self._trade_counter += 1
+            if pos.side == "LONG":
+                pnl_pct = (fill_price - avg_before) / avg_before * 100
+            else:
+                pnl_pct = (avg_before - fill_price) / avg_before * 100
+            pnl_usdt = closed_notional * pnl_pct / 100
+            tp_fee = closed_notional * self._maker_fee
+            self._update_stats(pnl_usdt, tp_fee)
+
+            trade = LiveTrade(
+                id=self._trade_counter, symbol=pos.symbol, side=pos.side,
+                entry_price=avg_before, entry_time=pos.entry_time,
+                exit_price=fill_price, exit_time=int(time.time() * 1000),
+                exit_reason="TP", qty=fill_qty, qty_usdt=round(closed_notional, 2),
+                leverage=pos.leverage, pnl_usdt=round(pnl_usdt, 4),
+                pnl_percent=round(pnl_pct, 4), fee_usdt=round(tp_fee, 4),
+                order_id=order_id,
+            )
+            self.trades.append(trade)
+            trades.append(trade)
+
+        pos.tp_order_id = 0
+        self._sync_position_qty(key, pos)
+
+        # Check if remaining position is dust (< $10 notional) → close entirely
+        remaining_qty = self._position_qty.get(key, 0)
+        if pos.condition != 0.0 and remaining_qty > 0:
+            dust_notional = remaining_qty * fill_price
+            if dust_notional < 10.0:
+                logger.info("[DUST_CLOSE] %s remaining qty=%.6f notional=$%.2f — marking closed",
+                            pos.symbol, remaining_qty, dust_notional)
+                try:
+                    close_side = "SELL" if pos.side == "LONG" else "BUY"
+                    self._client.market_order(pos.symbol, close_side, remaining_qty, reduce_only=True)
+                except Exception:
+                    pass  # Dust too small to close on exchange — that's OK
+                pos.condition = 0.0
+                pos.remaining_qty = 0.0
+                self._position_qty[key] = 0
+                self._cancel_all_grid_orders(key, pos)
+                logger.info("[POS_CLOSED] %s dust closed", pos.symbol)
+                return trades
+
+        logger.info("[TP_FILL] %s #%d @ %.4f qty=%.6f pnl=$%.2f | dca=%d | bot_qty=%.6f",
+                    pos.symbol, order_id, fill_price, fill_qty,
+                    pnl_usdt if closed_notional > 0 else 0,
+                    pos.dca_fills_count, remaining_qty)
+
+        if pos.condition == 0.0:
+            self._cancel_all_grid_orders(key, pos)
+            logger.info("[POS_CLOSED] %s fully closed via TP", pos.symbol)
+        elif place_next_orders:
+            # Before placing next orders, re-check dust (sync may have updated qty)
+            final_qty = self._position_qty.get(key, 0)
+            if final_qty > 0 and final_qty * fill_price < 10.0:
+                logger.info("[DUST_CLOSE] %s post-sync dust qty=%.6f — marking closed", pos.symbol, final_qty)
+                pos.condition = 0.0
+                pos.remaining_qty = 0.0
+                self._position_qty[key] = 0
+                self._cancel_all_grid_orders(key, pos)
+            # else: Do NOT place new DCA/TP here — wait for next candle KC update
+            # Backtest parity: elif means TP fill candle does not place new DCA/TP
+            # Next scanner cycle will compute fresh KC bands and place orders
+
+        return trades
+
+    def _process_sl_fill_live(self, key: str, pos: PositionState,
+                               fill_price: float, fill_qty: float,
+                               order_id: int) -> list[LiveTrade]:
+        """Process SL stop-market fill detected via WS.
+
+        Position is already closed on exchange by the SL order.
+        Do NOT send another market close — just update internal state and record trade.
+        """
+        trades: list[LiveTrade] = []
+
+        # Cancel remaining DCA/TP orders (position is closed, orders are orphaned)
+        self._cancel_all_grid_orders(key, pos)
+
+        # Record trade without sending another market order
+        self._trade_counter += 1
+        avg_e = pos.average_entry_price if pos.average_entry_price > 0 else fill_price
+        if pos.side == "LONG":
+            pnl_pct = (fill_price - avg_e) / avg_e * 100 if avg_e > 0 else 0
+        else:
+            pnl_pct = (avg_e - fill_price) / avg_e * 100 if avg_e > 0 else 0
+        notional = fill_qty * avg_e
+        pnl_usdt = notional * pnl_pct / 100
+        exit_fee = fill_qty * fill_price * self._taker_fee
+        self._update_stats(pnl_usdt, exit_fee)
+
+        trade = LiveTrade(
+            id=self._trade_counter, symbol=pos.symbol, side=pos.side,
+            entry_price=pos.average_entry_price, entry_time=pos.entry_time,
+            exit_price=fill_price, exit_time=int(time.time() * 1000),
+            exit_reason="SL_WS", qty=fill_qty,
+            qty_usdt=round(notional, 2), leverage=pos.leverage,
+            pnl_usdt=round(pnl_usdt, 4), pnl_percent=round(pnl_pct, 4),
+            fee_usdt=round(exit_fee, 4), order_id=order_id,
+        )
+        self.trades.append(trade)
+        trades.append(trade)
+
+        # Mark position closed internally
+        pos.condition = 0.0
+        pos.remaining_qty = 0.0
+        self._position_qty[key] = 0
+        self._sl_order_ids.pop(key, None)
+
+        logger.warning("[SL_FILL_WS] %s #%d @ %.4f pnl=$%.2f — position closed (no duplicate close)",
+                       pos.symbol, order_id, fill_price, pnl_usdt)
+        return trades
+
+    def _sync_position_qty(self, key: str, pos: PositionState) -> None:
+        """Sync _position_qty[key] with actual Binance exchange position.
+        Exchange is the single source of truth.
+        Rate-limited: max 1 call per 2 seconds to avoid API exhaustion.
+        """
+        now = time.time()
+        if now - getattr(self, '_last_qty_sync_ts', 0) < 2.0:
+            return  # Skip — too frequent, rely on fill qty from WS
+        self._last_qty_sync_ts = now
+
+        symbol = pos.symbol
+        try:
+            positions = self._client.get_positions()
+            for ep in positions:
+                if ep["symbol"] == symbol:
+                    exchange_qty = ep["amount"]
+                    bot_qty = self._position_qty.get(key, 0)
+                    if abs(exchange_qty - bot_qty) > 0.0001:
+                        logger.info("[QTY_SYNC] %s: bot=%.6f → exchange=%.6f",
+                                    symbol, bot_qty, exchange_qty)
+                    self._position_qty[key] = exchange_qty
+                    return
+            if pos.condition != 0.0:
+                logger.warning("[QTY_SYNC] %s not found on exchange but bot has position", symbol)
+                self._position_qty[key] = 0
+        except Exception as e:
+            logger.error("[QTY_SYNC] Failed for %s: %s", symbol, e)
+
+    def _assert_invariants(self, key: str, pos: PositionState) -> None:
+        """Post-fill invariant check. Triggers circuit breaker on violation."""
+        tf_label = self._tf_labels.get(key, "")
+        risk_mgr = self._get_risk_mgr(tf_label)
+        violations = []
+
+        if pos.dca_fills_count > risk_mgr._max_dca_steps:
+            violations.append(f"dca_count={pos.dca_fills_count} > max={risk_mgr._max_dca_steps}")
+        if pos.dca_fills_count < 0:
+            violations.append(f"dca_count={pos.dca_fills_count} < 0")
+        if pos.condition != 0.0 and self._position_qty.get(key, 0) <= 0:
+            violations.append(f"open position but qty={self._position_qty.get(key, 0)}")
+        if pos.condition != 0.0 and pos.total_position_notional <= 0:
+            violations.append(f"open position but notional={pos.total_position_notional}")
+
+        if violations:
+            for v in violations:
+                logger.critical("[INVARIANT] %s %s: %s", pos.symbol, key, v)
+            self.circuit_breaker_triggered = True
+            self.circuit_breaker_reason = f"Invariant violation: {violations[0]}"
+
+    def _catchup_poll_all_orders(self) -> None:
+        """WS disconnect recovery — poll all pending orders for missed fills."""
+        logger.info("[CATCHUP] Polling all pending orders for missed fills...")
+        for key, pos in list(self._positions.items()):
+            if pos.condition == 0.0:
+                continue
+            # Check DCA order
+            if pos.pending_dca_order_id > 0:
+                try:
+                    order = self._client.get_order(pos.symbol, pos.pending_dca_order_id)
+                    if order.get("status") == "FILLED":
+                        self.process_order_fill({
+                            "orderId": pos.pending_dca_order_id,
+                            "symbol": pos.symbol,
+                            "avgPrice": float(order.get("avgPrice", 0)),
+                            "executedQty": float(order.get("executedQty", 0)),
+                        })
+                except Exception as e:
+                    logger.error("[CATCHUP] DCA check failed %s: %s", pos.symbol, e)
+            # Check TP order
+            if getattr(pos, 'tp_order_id', 0) > 0:
+                try:
+                    order = self._client.get_order(pos.symbol, pos.tp_order_id)
+                    if order.get("status") == "FILLED":
+                        self.process_order_fill({
+                            "orderId": pos.tp_order_id,
+                            "symbol": pos.symbol,
+                            "avgPrice": float(order.get("avgPrice", 0)),
+                            "executedQty": float(order.get("executedQty", 0)),
+                        })
+                except Exception as e:
+                    logger.error("[CATCHUP] TP check failed %s: %s", pos.symbol, e)
+            # Check SL order
+            sl_id = self._sl_order_ids.get(key, 0)
+            if sl_id > 0:
+                try:
+                    order = self._client.get_order(pos.symbol, sl_id)
+                    if order.get("status") == "FILLED":
+                        self.process_order_fill({
+                            "orderId": sl_id,
+                            "symbol": pos.symbol,
+                            "avgPrice": float(order.get("avgPrice", 0)),
+                            "executedQty": float(order.get("executedQty", 0)),
+                        })
+                except Exception as e:
+                    logger.error("[CATCHUP] SL check failed %s: %s", pos.symbol, e)
+
     def _update_stats(self, pnl_usdt: float, fee: float) -> None:
         self.total_pnl += pnl_usdt
         self.total_fees += fee
@@ -918,29 +1556,37 @@ class LiveExecutor:
         return self._pair_states.get(symbol, PairState.OBSERVING).value
 
     def emergency_close_all(self) -> list[LiveTrade]:
-        """Emergency: close all positions immediately.
-
-        Fetches real-time prices from Binance book ticker for accurate PnL.
-        Falls back to entry price only if price fetch fails.
-        """
+        """Emergency: close all positions and cancel ALL orders immediately."""
         all_trades: list[LiveTrade] = []
 
-        # Try to get current prices for all symbols at once
-        current_prices: dict[str, float] = {}
+        # Step 1: Cancel ALL open orders on exchange for every symbol
+        all_symbols = set()
         for key, pos in list(self._positions.items()):
-            if pos.condition == 0.0:
-                continue
-            symbol = pos.symbol
-            if symbol not in current_prices:
-                try:
-                    ticker = self._client._request(
-                        "GET", "/fapi/v1/ticker/price",
-                        {"symbol": symbol}, signed=False,
-                    )
-                    current_prices[symbol] = float(ticker.get("price", 0))
-                except Exception:
-                    pass
+            if pos.condition != 0.0:
+                all_symbols.add(pos.symbol)
+        for sym in self._pair_configs:
+            all_symbols.add(sym)
 
+        for sym in all_symbols:
+            try:
+                self._client.cancel_all_orders(sym)
+                logger.info("[EMERGENCY] Cancelled all orders for %s", sym)
+            except Exception as e:
+                logger.error("[EMERGENCY] Cancel orders failed for %s: %s", sym, e)
+
+        # Step 2: Get current prices
+        current_prices: dict[str, float] = {}
+        for sym in all_symbols:
+            try:
+                ticker = self._client._request(
+                    "GET", "/fapi/v1/ticker/price",
+                    {"symbol": sym}, signed=False,
+                )
+                current_prices[sym] = float(ticker.get("price", 0))
+            except Exception:
+                pass
+
+        # Step 3: Close all positions
         for key in list(self._positions.keys()):
             pos = self._positions[key]
             if pos.condition != 0.0:

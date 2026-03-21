@@ -5,7 +5,7 @@ export function formatNum(value: number, decimals = 4, showSign = false): string
 }
 
 export function pnlColor(value: number): string {
-  if (value > 0) return "text-emerald-400";
-  if (value < 0) return "text-red-400";
+  if (value > 0) return "text-teal-400";
+  if (value < 0) return "text-rose-400";
   return "text-slate-400";
 }

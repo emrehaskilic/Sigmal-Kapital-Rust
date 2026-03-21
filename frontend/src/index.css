@@ -4,10 +4,72 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Theme CSS Variables ── */
+:root {
+  /* Light mode */
+  --bg-page: #f0f2f5;
+  --bg-card: #ffffff;
+  --bg-card-inner: #f8f9fb;
+  --bg-input: #f0f2f5;
+  --bg-nav: rgba(255,255,255,0.95);
+  --border-card: rgba(0,0,0,0.06);
+  --border-input: rgba(0,0,0,0.10);
+  --border-nav: rgba(0,0,0,0.06);
+  --text-primary: #1a1a2e;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+  --text-faint: rgba(148,163,184,0.5);
+  --shadow-card: 0 1px 8px rgba(0,0,0,0.06);
+  --shadow-card-hover: 0 2px 12px rgba(0,0,0,0.10);
+  --shadow-dropdown: 0 8px 24px rgba(0,0,0,0.12);
+  --chart-bg: #ffffff;
+  --chart-grid: rgba(0,0,0,0.04);
+  --chart-text: #64748b;
+}
+
+.dark {
+  --bg-page: #040810;
+  --bg-card: rgba(11,26,46,0.8);
+  --bg-card-inner: rgba(6,14,26,0.6);
+  --bg-input: #060e1a;
+  --bg-nav: rgba(6,14,26,0.95);
+  --border-card: rgba(51,65,85,0.2);
+  --border-input: rgba(51,65,85,0.25);
+  --border-nav: rgba(51,65,85,0.2);
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-muted: rgba(148,163,184,0.6);
+  --text-faint: rgba(148,163,184,0.4);
+  --shadow-card: 0 2px 12px rgba(0,0,0,0.25);
+  --shadow-card-hover: 0 2px 16px rgba(59,130,246,0.08);
+  --shadow-dropdown: 0 8px 24px rgba(0,0,0,0.4);
+  --chart-bg: #040810;
+  --chart-grid: rgba(30,41,59,0.09);
+  --chart-text: rgba(100,116,139,0.5);
+}
+
 body {
   margin: 0;
-  background-color: #050a14;
-  color: #e2e8f0;
+  background-color: var(--bg-page);
+  color: var(--text-primary);
   font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
+
+/* Utility classes for themed colors */
+.bg-page { background-color: var(--bg-page); }
+.bg-card { background: var(--bg-card); }
+.bg-card-inner { background: var(--bg-card-inner); }
+.bg-input { background-color: var(--bg-input); }
+.bg-nav { background: var(--bg-nav); }
+.border-card { border-color: var(--border-card); }
+.border-input { border-color: var(--border-input); }
+.border-nav { border-color: var(--border-nav); }
+.text-primary { color: var(--text-primary); }
+.text-secondary { color: var(--text-secondary); }
+.text-muted { color: var(--text-muted); }
+.text-faint { color: var(--text-faint); }
+.shadow-card { box-shadow: var(--shadow-card); }
+.shadow-card-hover { box-shadow: var(--shadow-card-hover); }
+.shadow-dropdown { box-shadow: var(--shadow-dropdown); }

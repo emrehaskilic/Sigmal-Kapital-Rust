@@ -43,34 +43,45 @@ class BinanceFutures:
         return sig
 
     def _request(
-        self, method: str, path: str, params: dict | None = None, signed: bool = True
+        self, method: str, path: str, params: dict | None = None, signed: bool = True,
+        _max_retries: int = 3,
     ) -> Any:
-        """Execute HTTP request with optional signing."""
-        params = params or {}
-        headers = {"X-MBX-APIKEY": self._api_key}
+        """Execute HTTP request with optional signing and retry on 429/5xx."""
+        for attempt in range(_max_retries):
+            req_params = dict(params or {})
+            headers = {"X-MBX-APIKEY": self._api_key}
 
-        if signed:
-            params["timestamp"] = int(time.time() * 1000)
-            params["signature"] = self._sign(params)
+            if signed:
+                req_params["timestamp"] = int(time.time() * 1000)
+                req_params["signature"] = self._sign(req_params)
 
-        url = f"{self._base}{path}"
-        if method == "GET":
-            qs = urllib.parse.urlencode(params)
-            url = f"{url}?{qs}" if qs else url
-            data = None
-        else:
-            data = urllib.parse.urlencode(params).encode()
+            url = f"{self._base}{path}"
+            if method == "GET":
+                qs = urllib.parse.urlencode(req_params)
+                url = f"{url}?{qs}" if qs else url
+                data = None
+            else:
+                data = urllib.parse.urlencode(req_params).encode()
 
-        req = urllib.request.Request(
-            url, data=data, headers=headers, method=method
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return json.loads(resp.read().decode())
-        except urllib.error.HTTPError as e:
-            body = e.read().decode()
-            logger.error("Binance API error %d: %s — %s", e.code, path, body)
-            raise RuntimeError(f"Binance API {e.code}: {body}") from e
+            req = urllib.request.Request(
+                url, data=data, headers=headers, method=method
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    return json.loads(resp.read().decode())
+            except urllib.error.HTTPError as e:
+                body = e.read().decode()
+                # Retry on 429 (rate limit) and 5xx (server error)
+                if e.code in (429, 500, 502, 503) and attempt < _max_retries - 1:
+                    wait = (attempt + 1) * 2  # 2s, 4s, 6s
+                    logger.warning(
+                        "Binance API %d: %s — retry %d/%d in %ds",
+                        e.code, path, attempt + 1, _max_retries, wait,
+                    )
+                    time.sleep(wait)
+                    continue
+                logger.error("Binance API error %d: %s — %s", e.code, path, body)
+                raise RuntimeError(f"Binance API {e.code}: {body}") from e
 
     # ------------------------------------------------------------------
     # Account Info
@@ -107,10 +118,13 @@ class BinanceFutures:
                 "side": "LONG" if amt > 0 else "SHORT",
                 "amount": abs(amt),
                 "entry_price": float(p["entryPrice"]),
+                "mark_price": float(p.get("markPrice", 0)),
+                "break_even_price": float(p.get("breakEvenPrice", p["entryPrice"])),
                 "unrealized_pnl": float(p["unRealizedProfit"]),
                 "leverage": int(p["leverage"]),
                 "margin_type": p["marginType"],
                 "notional": abs(float(p.get("notional", 0))),
+                "isolated_margin": float(p.get("isolatedMargin", 0)),
             })
         return positions
 
@@ -158,11 +172,13 @@ class BinanceFutures:
             quantity: base asset quantity
             reduce_only: True for closing positions
         """
+        info = self.get_symbol_info(symbol)
+        qty_precision = info.get("quantityPrecision", 3)
         params: dict[str, Any] = {
             "symbol": symbol,
             "side": side,
             "type": "MARKET",
-            "quantity": quantity,
+            "quantity": f"{quantity:.{qty_precision}f}",
         }
         if reduce_only:
             params["reduceOnly"] = "true"
@@ -170,6 +186,42 @@ class BinanceFutures:
         logger.info(
             "[ORDER] MARKET %s %s qty=%.6f → orderId=%s status=%s",
             side, symbol, quantity, result.get("orderId"), result.get("status"),
+        )
+        return result
+
+    def limit_order(
+        self, symbol: str, side: str, quantity: float, price: float,
+        reduce_only: bool = False
+    ) -> dict:
+        """Place a LIMIT order (for DCA/TP).
+
+        Args:
+            symbol: e.g. "BTCUSDT"
+            side: "BUY" or "SELL"
+            quantity: base asset quantity
+            price: limit price
+            reduce_only: True for TP (closing) orders
+        """
+        # Format as strings to avoid float precision issues (e.g. 1.7320000000000002)
+        info = self.get_symbol_info(symbol)
+        qty_precision = info.get("quantityPrecision", 3)
+        price_precision = info.get("pricePrecision", 2)
+
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "side": side,
+            "type": "LIMIT",
+            "quantity": f"{quantity:.{qty_precision}f}",
+            "price": f"{price:.{price_precision}f}",
+            "timeInForce": "GTC",
+            "newOrderRespType": "RESULT",
+        }
+        if reduce_only:
+            params["reduceOnly"] = "true"
+        result = self._request("POST", "/fapi/v1/order", params)
+        logger.info(
+            "[ORDER] LIMIT %s %s qty=%.6f price=%.6f → orderId=%s status=%s",
+            side, symbol, quantity, price, result.get("orderId"), result.get("status"),
         )
         return result
 
@@ -271,18 +323,22 @@ class BinanceFutures:
     # Exchange Info (for quantity precision)
     # ------------------------------------------------------------------
 
-    _exchange_info_cache: dict[str, dict] = {}
-    _exchange_info_ts: float = 0
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
 
     def get_symbol_info(self, symbol: str) -> dict[str, Any]:
         """Get symbol trading rules (precision, min qty, etc.)."""
+        if not hasattr(self, "_sym_cache"):
+            self._sym_cache: dict[str, dict] = {}
+            self._sym_cache_ts: float = 0
         now = time.time()
-        if not self._exchange_info_cache or now - self._exchange_info_ts > 3600:
+        if not self._sym_cache or now - self._sym_cache_ts > 3600:
             data = self._request("GET", "/fapi/v1/exchangeInfo", signed=False)
+            self._sym_cache = {}
             for s in data.get("symbols", []):
-                self._exchange_info_cache[s["symbol"]] = s
-            self._exchange_info_ts = now
-        return self._exchange_info_cache.get(symbol, {})
+                self._sym_cache[s["symbol"]] = s
+            self._sym_cache_ts = now
+        return self._sym_cache.get(symbol, {})
 
     def calc_quantity(
         self, symbol: str, usdt_amount: float, leverage: int, price: float
@@ -291,18 +347,92 @@ class BinanceFutures:
 
         Returns quantity rounded to symbol's precision.
         """
+        import math
         notional = usdt_amount * leverage
         raw_qty = notional / price
         info = self.get_symbol_info(symbol)
-        precision = info.get("quantityPrecision", 3)
-        qty = round(raw_qty, precision)
+        # Use stepSize from LOT_SIZE filter
+        step_size = 0
+        for f in info.get("filters", []):
+            if f.get("filterType") == "LOT_SIZE":
+                step_size = float(f.get("stepSize", 0))
+                break
+        if step_size > 0:
+            qty = math.floor(raw_qty / step_size) * step_size
+        else:
+            precision = info.get("quantityPrecision", 3)
+            qty = round(raw_qty, precision)
         # Ensure minimum notional (Binance requires >= 5 USDT notional)
         if qty * price < 5:
             return 0.0
         return qty
 
     def calc_price(self, symbol: str, price: float) -> float:
-        """Round price to symbol's price precision."""
+        """Round price to symbol's tick size (not just precision).
+
+        Binance requires prices to be exact multiples of tickSize.
+        """
         info = self.get_symbol_info(symbol)
+        # Find tickSize from PRICE_FILTER
+        tick_size = 0.0
+        for f in info.get("filters", []):
+            if f.get("filterType") == "PRICE_FILTER":
+                tick_size = float(f.get("tickSize", 0))
+                break
+        if tick_size > 0:
+            # Round down to nearest tick
+            import math
+            return math.floor(price / tick_size) * tick_size
+        # Fallback to pricePrecision
         precision = info.get("pricePrecision", 2)
         return round(price, precision)
+
+    def get_all_orders(self, symbol: str, limit: int = 100) -> list[dict]:
+        """Get all orders (filled, cancelled, open) for a symbol.
+
+        GET /fapi/v1/allOrders
+        Returns most recent orders, sorted by time desc.
+        """
+        params = {"symbol": symbol, "limit": limit}
+        return self._request("GET", "/fapi/v1/allOrders", params)
+
+    # ------------------------------------------------------------------
+    # User Data Stream — listenKey management
+    # ------------------------------------------------------------------
+
+    def create_listen_key(self) -> str:
+        """Create a listenKey for User Data Stream (WS order updates).
+
+        POST /fapi/v1/listenKey
+        Returns the listenKey string. Valid for 60 minutes.
+        Testnet/mainnet determined automatically by base_url.
+        """
+        data = self._request("POST", "/fapi/v1/listenKey", {}, signed=False)
+        key = data.get("listenKey", "")
+        logger.info("[UDS] Listen key created: %s...%s", key[:8], key[-4:])
+        return key
+
+    def renew_listen_key(self, listen_key: str) -> None:
+        """Renew listenKey to extend validity by another 60 minutes.
+
+        PUT /fapi/v1/listenKey — call every 25 minutes.
+        """
+        self._request(
+            "PUT", "/fapi/v1/listenKey",
+            {"listenKey": listen_key}, signed=False,
+        )
+        logger.debug("[UDS] Listen key renewed")
+
+    def close_listen_key(self, listen_key: str) -> None:
+        """Close listenKey and stop User Data Stream.
+
+        DELETE /fapi/v1/listenKey — call on live stop.
+        """
+        try:
+            self._request(
+                "DELETE", "/fapi/v1/listenKey",
+                {"listenKey": listen_key}, signed=False,
+            )
+            logger.info("[UDS] Listen key closed")
+        except Exception as e:
+            logger.error("[UDS] Failed to close listen key: %s", e)

@@ -13,9 +13,11 @@ from websockets.asyncio.client import ClientConnection
 logger = logging.getLogger(__name__)
 
 _WS_BASE = "wss://fstream.binance.com/ws"
+_WS_TESTNET_BASE = "wss://stream.binancefuture.com/ws"
 
 OnCandleCallback = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
 OnBookTickerCallback = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
+OnOrderUpdateCallback = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
 
 
 class BinanceWS:
@@ -25,9 +27,11 @@ class BinanceWS:
         self,
         on_candle: OnCandleCallback,
         on_book_ticker: OnBookTickerCallback | None = None,
+        testnet: bool = False,
     ) -> None:
         self._on_candle = on_candle
         self._on_book_ticker = on_book_ticker
+        self._ws_base = _WS_TESTNET_BASE if testnet else _WS_BASE
         self._ws: ClientConnection | None = None
         self._subscriptions: set[str] = set()
         self._running = False
@@ -52,12 +56,12 @@ class BinanceWS:
         """Auto-reconnect read loop."""
         while self._running:
             try:
-                async with websockets.connect(_WS_BASE, ping_interval=20) as ws:
+                async with websockets.connect(self._ws_base, ping_interval=20) as ws:
                     self._ws = ws
                     # Re-subscribe on reconnect
                     if self._subscriptions:
                         await self._send_subscribe(list(self._subscriptions))
-                    logger.info("WS connected to %s", _WS_BASE)
+                    logger.info("WS connected to %s", self._ws_base)
                     async for raw_msg in ws:
                         await self._handle_message(raw_msg)
             except websockets.ConnectionClosed:
@@ -162,3 +166,105 @@ class BinanceWS:
                 "time": data.get("T", 0),
             }
             await self._on_book_ticker(ticker)
+
+
+class BinanceUserDataWS:
+    """WebSocket for Binance User Data Stream — real-time order fill notifications.
+
+    Separate from BinanceWS (market data) to keep concerns isolated.
+    Handles: ORDER_TRADE_UPDATE, ACCOUNT_UPDATE events.
+    Auto-reconnects on disconnect with catch-up poll callback.
+    """
+
+    def __init__(
+        self,
+        on_order_update: OnOrderUpdateCallback,
+        on_reconnect: Callable[[], Coroutine[Any, Any, None]] | None = None,
+        testnet: bool = False,
+    ) -> None:
+        self._on_order_update = on_order_update
+        self._on_reconnect = on_reconnect
+        self._ws_base = _WS_TESTNET_BASE if testnet else _WS_BASE
+        self._ws: ClientConnection | None = None
+        self._listen_key: str = ""
+        self._running = False
+        self._connected = False
+
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    async def connect(self, listen_key: str) -> None:
+        """Start User Data Stream with the given listenKey."""
+        self._listen_key = listen_key
+        self._running = True
+        asyncio.create_task(self._run_loop())
+
+    async def reconnect(self, new_listen_key: str) -> None:
+        """Reconnect with a new listenKey (for renewal or 24h reconnect)."""
+        self._listen_key = new_listen_key
+        if self._ws:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+        # _run_loop will auto-reconnect with new key
+
+    async def close(self) -> None:
+        self._running = False
+        self._connected = False
+        if self._ws:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+
+    async def _run_loop(self) -> None:
+        """Auto-reconnect read loop for User Data Stream."""
+        while self._running:
+            url = f"{self._ws_base}/{self._listen_key}"
+            try:
+                async with websockets.connect(url, ping_interval=20) as ws:
+                    self._ws = ws
+                    self._connected = True
+                    logger.info("[UDS_WS] Connected to User Data Stream")
+
+                    # On reconnect, trigger catch-up poll
+                    if self._on_reconnect:
+                        try:
+                            await self._on_reconnect()
+                        except Exception as e:
+                            logger.error("[UDS_WS] Reconnect callback error: %s", e)
+
+                    async for raw_msg in ws:
+                        await self._handle_message(raw_msg)
+
+            except websockets.ConnectionClosed:
+                self._connected = False
+                logger.warning("[UDS_WS] Connection closed, reconnecting in 3s...")
+                await asyncio.sleep(3)
+            except Exception:
+                self._connected = False
+                logger.exception("[UDS_WS] Error, reconnecting in 5s...")
+                await asyncio.sleep(5)
+
+    async def _handle_message(self, raw: str) -> None:
+        data = json.loads(raw)
+        event_type = data.get("e")
+
+        if event_type == "ORDER_TRADE_UPDATE":
+            await self._on_order_update(data)
+
+        elif event_type == "ACCOUNT_UPDATE":
+            # Balance/position changes — log for observability
+            logger.debug("[UDS_ACCOUNT] %s", json.dumps(data)[:200])
+
+        elif event_type == "listenKeyExpired":
+            logger.warning("[UDS_WS] Listen key expired! Forcing disconnect to trigger reconnect...")
+            self._connected = False
+            # Force close WS to trigger _run_loop's auto-reconnect
+            if self._ws:
+                try:
+                    await self._ws.close()
+                except Exception:
+                    pass

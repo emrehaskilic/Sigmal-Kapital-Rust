@@ -11,13 +11,13 @@ const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT', 'DOGEUSD
 const TIMEFRAMES = ['1m', '3m', '5m', '15m']
 const TRIAL_OPTIONS = [500, 1000, 2000, 3000]
 
-const STEP_LABELS = ['PMax Keşif', 'KC Optimize', 'Kelly DynComp', 'DynSL Test']
-const STEP_KEYS = ['pmax_discovery', 'kc_optimize', 'kelly_dyncomp', 'dynsl_test']
+const STEP_LABELS = ['Adaptive PMax', 'Keltner Channel', 'Graduated DCA', 'Graduated TP']
+const STEP_KEYS = ['pmax', 'kc', 'dca', 'tp']
 const STEP_DESCRIPTIONS = [
-  'Adaptive PMax parametrelerini 12+ hafta üzerinde optimize eder',
-  'Keltner Channel parametrelerini PMax kilitli olarak optimize eder',
-  'Kelly/DynComp dinamik pozisyon büyüklüğünü optimize eder',
-  'Hard Stop yüzdesini grid search ile test eder',
+  '9 Adaptive PMax parametresini WF ile optimize eder (saf sinyal, KC/DCA/TP kapalı)',
+  '3 Keltner Channel parametresini PMax kilitli olarak optimize eder',
+  '4 DCA kademe çarpanını PMax+KC kilitli olarak optimize eder',
+  '4 TP kademe oranını PMax+KC+DCA kilitli olarak optimize eder',
 ]
 
 const PARAM_LABELS: Record<string, string> = {
@@ -27,12 +27,11 @@ const PARAM_LABELS: Record<string, string> = {
   atr_base: 'ATR Base', atr_scale: 'ATR Scale',
   update_interval: 'Update Int.',
   kc_length: 'KC Length', kc_multiplier: 'KC Multiplier',
-  kc_atr_period: 'KC ATR Period', max_dca_steps: 'Max DCA',
-  tp_close_percent: 'TP Close %',
-  base_margin_pct: 'Base Margin %',
-  tier1_threshold: 'Tier1 Eşik', tier1_pct: 'Tier1 %',
-  tier2_threshold: 'Tier2 Eşik', tier2_pct: 'Tier2 %',
-  hard_stop: 'Hard Stop %',
+  kc_atr_period: 'KC ATR Period',
+  dca_m1: 'DCA Step 1', dca_m2: 'DCA Step 2',
+  dca_m3: 'DCA Step 3', dca_m4: 'DCA Step 4',
+  tp1: 'TP Step 1', tp2: 'TP Step 2',
+  tp3: 'TP Step 3', tp4: 'TP Step 4',
 }
 
 // AIBots Dark Theme
@@ -340,6 +339,12 @@ export default function PipelinePage() {
 
               {isStepRunning && (
                 <>
+                  {store.totalFolds > 0 && (
+                    <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
+                      <span className="font-medium">Fold {store.currentFold} / {store.totalFolds}</span>
+                      <span className="text-[10px]">{store.foldResults.filter(f => f.test_net > 0).length} karlı</span>
+                    </div>
+                  )}
                   <div className="mb-3">
                     <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
                       <span>Trial {store.completedTrials} / {store.totalTrials}</span>
@@ -442,7 +447,6 @@ export default function PipelinePage() {
               selectedRow={selectedRow} expandedRow={expandedRow}
               onSelect={isAwaitingSelection ? setSelectedRow : undefined}
               onExpand={(i) => setExpandedRow(expandedRow === i ? null : i)}
-              isKelly={currentStepKey === 'kelly_dyncomp'}
             />
           )}
 
@@ -537,7 +541,7 @@ export default function PipelinePage() {
 
 function LockedParamSection({ category, params }: { category: string; params: Record<string, any> }) {
   const [open, setOpen] = useState(false)
-  const labels: Record<string, string> = { pmax: 'PMax', kc: 'Keltner Channel', kelly: 'Kelly/DynComp', dynsl: 'DynSL' }
+  const labels: Record<string, string> = { pmax: 'Adaptive PMax', kc: 'Keltner Channel', dca: 'Graduated DCA', tp: 'Graduated TP' }
   return (
     <div>
       <button onClick={() => setOpen(!open)}
@@ -573,9 +577,9 @@ function MetricBox({ label, value, sub, color }: { label: string; value: string;
   )
 }
 
-function Top10Table({ top10, selectedRow, expandedRow, onSelect, onExpand, isKelly }: {
+function Top10Table({ top10, selectedRow, expandedRow, onSelect, onExpand }: {
   top10: V2Top10Entry[]; selectedRow: number | null; expandedRow: number | null;
-  onSelect?: (i: number) => void; onExpand: (i: number) => void; isKelly: boolean;
+  onSelect?: (i: number) => void; onExpand: (i: number) => void;
 }) {
   if (top10.length === 0) return null
   const fmtNum = (n: number, dec = 1) => typeof n === 'number' ? n.toFixed(dec) : '—'
@@ -600,8 +604,7 @@ function Top10Table({ top10, selectedRow, expandedRow, onSelect, onExpand, isKel
               <th className="text-right py-2 px-2 font-semibold">Net %</th>
               <th className="text-right py-2 px-2 font-semibold">Max DD %</th>
               <th className="text-right py-2 px-2 font-semibold">WR %</th>
-              {isKelly && <th className="text-right py-2 px-2 font-semibold">Bakiye</th>}
-              <th className="text-right py-2 px-2 font-semibold">{isKelly ? 'Trade' : 'Karlı Hafta'}</th>
+              <th className="text-right py-2 px-2 font-semibold">Karlı Fold</th>
               <th className="text-right py-2 px-2 font-semibold">Ratio</th>
               <th className="w-6 py-2 px-2"></th>
             </tr>
@@ -636,13 +639,8 @@ function Top10Table({ top10, selectedRow, expandedRow, onSelect, onExpand, isKel
                     </td>
                     <td className="py-2 px-2 text-right text-amber-400">{fmtNum(entry.max_dd)}</td>
                     <td className="py-2 px-2 text-right text-slate-300">{fmtNum(entry.avg_wr, 0)}</td>
-                    {isKelly && (
-                      <td className="py-2 px-2 text-right text-emerald-300 font-mono">
-                        {entry.balance ? `$${entry.balance.toLocaleString()}` : '—'}
-                      </td>
-                    )}
                     <td className="py-2 px-2 text-right text-slate-400">
-                      {isKelly ? (entry.total_trades ?? '—') : (entry.profitable_weeks ?? '—')}
+                      {entry.profitable_weeks ?? '—'}
                     </td>
                     <td className={`py-2 px-2 text-right font-semibold ${Number(ratio) > 1 ? 'text-blue-400' : 'text-slate-500'}`}>
                       {ratio}
@@ -657,7 +655,7 @@ function Top10Table({ top10, selectedRow, expandedRow, onSelect, onExpand, isKel
                   </tr>
                   {isExpanded && (
                     <tr className="bg-[#050a14]/50">
-                      <td colSpan={onSelect ? 10 : 9} className="px-4 py-3">
+                      <td colSpan={onSelect ? 9 : 8} className="px-4 py-3">
                         <div className="flex gap-6">
                           <div className="flex-1">
                             <div className="text-[10px] text-slate-500 font-semibold mb-1.5 uppercase tracking-wider">Parametreler</div>

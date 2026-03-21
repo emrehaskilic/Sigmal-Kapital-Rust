@@ -181,10 +181,10 @@ const DEFAULT_V2: V2State = {
   selectedIndices: {},
   nTrials: 1000,
   steps: [
-    { key: 'pmax_discovery', label: 'PMax Keşif', strategy: 'unified_pmax' },
-    { key: 'kc_optimize', label: 'KC Optimize', strategy: 'unified_kc' },
-    { key: 'kelly_dyncomp', label: 'Kelly DynComp', strategy: 'unified_kelly' },
-    { key: 'dynsl_test', label: 'DynSL Test', strategy: 'unified_dynsl' },
+    { key: 'pmax', label: 'Adaptive PMax', strategy: 'wf_pmax' },
+    { key: 'kc', label: 'Keltner Channel', strategy: 'wf_kc' },
+    { key: 'dca', label: 'Graduated DCA', strategy: 'wf_dca' },
+    { key: 'tp', label: 'Graduated TP', strategy: 'wf_tp' },
   ],
 }
 
@@ -271,6 +271,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
           case 'fold_started':
             set({
               currentFold: data.fold,
+              totalFolds: data.total_folds ?? get().totalFolds,
               currentRound: data.fold,
               currentRoundName: `Fold ${data.fold}`,
               totalTrials: data.n_trials,
@@ -307,18 +308,8 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
               })
             }
             // V2: top10 varsa step'i güncelle
-            if (data.summary?.top10) {
-              const step = data.summary.step
-              const stepKeyMap: Record<string, string> = {
-                pmax: 'pmax_discovery',
-                kc: 'kc_optimize',
-                kelly: 'kelly_dyncomp',
-                dynsl: 'dynsl_test',
-              }
-              const stepKey = stepKeyMap[step]
-              if (stepKey) {
-                get().v2SetStepResults(stepKey, data.summary.top10)
-              }
+            if (data.summary?.top10 && data.summary?.step) {
+              get().v2SetStepResults(data.summary.step, data.summary.top10)
             }
             break
 
@@ -339,7 +330,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
 
           case 'trial_completed':
             set(s => {
-              const newCompleted = s.completedTrials + 1
+              const newCompleted = data.count ?? (s.completedTrials + 1)
               return {
                 completedTrials: newCompleted,
                 bestScore: Math.max(s.bestScore, data.score ?? 0),

@@ -1,4 +1,4 @@
-const BASE = "http://localhost:8000";
+const BASE = `http://${window.location.hostname}:8000`;
 const OPTIMIZER_BASE = "http://localhost:8055";
 
 export async function fetchSymbols(): Promise<{ symbols: string[]; count: number }> {
@@ -41,13 +41,11 @@ export async function fetchStatus() {
 
 // ── Backtest API ──
 
-export async function runBacktest(symbols: string[], lookbackDays: number, _config: object) {
-  // Use fast numpy engine instead of slow candle-by-candle backtester
-  const symbol = symbols[0] || "ETHUSDT";
+export async function runBacktest(symbols: string[], lookbackDays: number, _config: object, weeklyReset: boolean = false) {
   const res = await fetch(`${BASE}/api/backtest/fast`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ symbol, days: lookbackDays }),
+    body: JSON.stringify({ symbols, symbol: symbols[0] || "ETHUSDT", days: lookbackDays, weekly_reset: weeklyReset }),
   });
   return res.json();
 }
@@ -70,7 +68,9 @@ export async function fetchBacktestResults() {
 }
 
 export async function resetBacktest() {
-  const res = await fetch(`${BASE}/api/backtest/reset`, { method: "POST" });
+  // Reset both old and fast backtest state
+  await fetch(`${BASE}/api/backtest/reset`, { method: "POST" }).catch(() => {});
+  const res = await fetch(`${BASE}/api/backtest/fast/reset`, { method: "POST" });
   return res.json();
 }
 
@@ -118,6 +118,11 @@ export async function liveEmergencyClose() {
   return res.json();
 }
 
+export async function liveOrderHistory() {
+  const res = await fetch(`${BASE}/api/live/order-history`);
+  return res.json();
+}
+
 export async function liveStatus() {
   const res = await fetch(`${BASE}/api/live/status`);
   return res.json();
@@ -143,6 +148,28 @@ export async function liveGetProtection() {
 
 export async function liveResetCircuitBreaker() {
   const res = await fetch(`${BASE}/api/live/reset-circuit-breaker`, { method: "POST" });
+  return res.json();
+}
+
+// ── Monitor API ──
+
+export async function monitorCreateToken() {
+  const res = await fetch(`${BASE}/api/monitor/token`, { method: "POST" });
+  return res.json();
+}
+
+export async function monitorListTokens() {
+  const res = await fetch(`${BASE}/api/monitor/tokens`);
+  return res.json();
+}
+
+export async function monitorDeleteToken(token: string) {
+  const res = await fetch(`${BASE}/api/monitor/token/${token}`, { method: "DELETE" });
+  return res.json();
+}
+
+export async function monitorGetData(token: string) {
+  const res = await fetch(`${BASE}/api/sigmakapital/${token}`);
   return res.json();
 }
 

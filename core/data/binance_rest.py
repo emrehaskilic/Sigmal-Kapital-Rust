@@ -15,14 +15,16 @@ from typing import Any
 
 _CACHE_TTL = 3600  # 1 hour
 _BASE = "https://fapi.binance.com"
+_TESTNET_BASE = "https://testnet.binancefuture.com"
 
 
 class BinanceRest:
     """REST wrapper for Binance Futures with sync + async support."""
 
-    def __init__(self) -> None:
+    def __init__(self, testnet: bool = False) -> None:
         self._symbols_cache: list[dict[str, Any]] = []
         self._cache_ts: float = 0.0
+        self._base = _TESTNET_BASE if testnet else _BASE
 
     # ------------------------------------------------------------------
     # Sync helpers (for Streamlit)
@@ -43,7 +45,7 @@ class BinanceRest:
         if not force and self._symbols_cache and (now - self._cache_ts) < _CACHE_TTL:
             return self._symbols_cache
 
-        data = self._sync_get(f"{_BASE}/fapi/v1/exchangeInfo")
+        data = self._sync_get(f"{self._base}/fapi/v1/exchangeInfo")
 
         symbols: list[dict[str, Any]] = []
         for s in data.get("symbols", []):
@@ -75,7 +77,7 @@ class BinanceRest:
     ) -> list[dict[str, Any]]:
         """Fetch historical kline/candlestick data (sync)."""
         params = {"symbol": symbol.upper(), "interval": interval, "limit": limit}
-        raw = self._sync_get(f"{_BASE}/fapi/v1/klines", params)
+        raw = self._sync_get(f"{self._base}/fapi/v1/klines", params)
 
         candles: list[dict[str, Any]] = []
         for k in raw:
@@ -94,7 +96,7 @@ class BinanceRest:
 
     def fetch_book_tickers_sync(self, symbols: list[str] | None = None) -> dict[str, dict[str, float]]:
         """Fetch best bid/ask for symbols. Returns {SYMBOL: {bid, ask, bid_qty, ask_qty}}."""
-        data = self._sync_get(f"{_BASE}/fapi/v1/ticker/bookTicker")
+        data = self._sync_get(f"{self._base}/fapi/v1/ticker/bookTicker")
         result: dict[str, dict[str, float]] = {}
         symbol_set = set(s.upper() for s in symbols) if symbols else None
         for t in data:
@@ -114,7 +116,7 @@ class BinanceRest:
         params = {}
         if symbol:
             params["symbol"] = symbol.upper()
-        data = self._sync_get(f"{_BASE}/fapi/v1/ticker/24hr", params or None)
+        data = self._sync_get(f"{self._base}/fapi/v1/ticker/24hr", params or None)
 
         if isinstance(data, dict):
             data = [data]

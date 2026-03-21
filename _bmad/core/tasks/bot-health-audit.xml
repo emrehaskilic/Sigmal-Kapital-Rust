@@ -1,0 +1,111 @@
+<task id="_bmad/core/tasks/bot-health-audit.xml" name="Bot Health Audit"
+  description="End-to-end live trading bot health check — positions, orders, sync, DCA/TP flow, scanner health. Use when the user says 'audit bot' or 'check bot health' or 'bot audit'">
+  <objective>Validate live trading bot order execution is working correctly by comparing bot state with Binance exchange state</objective>
+
+  <inputs>
+    <input name="backend_url" required="false" desc="Backend URL, default http://localhost:8000" />
+  </inputs>
+
+  <llm critical="true">
+    <i>You are a ruthless trading systems auditor. Zero tolerance for inconsistencies.</i>
+    <i>Exchange data is TRUTH. Bot internal state is SUSPECT until verified.</i>
+    <i>Every finding needs EVIDENCE — order IDs, prices, timestamps, quantities.</i>
+    <i>Do NOT skip any check. Do NOT say 'looks fine' without proving it.</i>
+  </llm>
+
+  <flow>
+    <step n="1" title="Collect Bot State">
+      <action>GET {backend_url}/api/live/status — save full response</action>
+      <action>Extract: positions, signal_log, trade_log, stats, totals, pair_summaries, balance</action>
+      <action>If bot not running, report and abort</action>
+    </step>
+
+    <step n="2" title="Collect Exchange State">
+      <action>GET {backend_url}/api/live/orders — save full response</action>
+      <action>Extract: Binance positions (symbol, side, amount, entry_price, uPnL)</action>
+      <action>Extract: Binance open orders (orderId, side, type, price, qty, reduceOnly, status)</action>
+    </step>
+
+    <step n="3" title="Collect Chart Data">
+      <action>GET {backend_url}/api/chart-data?symbol=ETHUSDT&amp;limit=100&amp;source=live</action>
+      <action>Extract last candle: kc_upper, kc_lower, close, direction, pmax</action>
+    </step>
+
+    <step n="4" title="Position Sync Check">
+      <action>Compare bot position count vs Binance position count</action>
+      <action>For each position compare: symbol, side, entry_price (tolerance $0.01), amount</action>
+      <action>Report: PASS if all match, FAIL with specific mismatches</action>
+      <halt-condition>If bot shows position but Binance doesn't → CRITICAL: ghost position</halt-condition>
+      <halt-condition>If Binance shows position but bot doesn't → CRITICAL: orphan position</halt-condition>
+    </step>
+
+    <step n="5" title="Order Validation">
+      <action>For each open position, check Binance orders:</action>
+      <action>- TP order exists? (reduceOnly=true, LIMIT type)</action>
+      <action>- DCA order exists? (reduceOnly=false, LIMIT type) — only if dca_count &lt; 4</action>
+      <action>- No DCA order if dca_count = 4 (max reached)</action>
+      <action>- No orphan orders for non-existent positions</action>
+      <action>Report: PASS/FAIL with order IDs and details</action>
+    </step>
+
+    <step n="6" title="KC Band Alignment">
+      <action>Get current KC Upper and KC Lower from chart data last candle</action>
+      <action>For LONG position: TP price should be near KC Upper, DCA price near KC Lower</action>
+      <action>For SHORT position: TP price should be near KC Lower, DCA price near KC Upper</action>
+      <action>Tolerance: $3 max</action>
+      <action>Report: PASS/FAIL with actual prices vs expected KC levels</action>
+    </step>
+
+    <step n="7" title="Signal Health">
+      <action>Check signal_log — when was the last signal?</action>
+      <action>If last signal &gt; 5 minutes ago → WARNING: scanner may be stalled</action>
+      <action>If last signal &gt; 10 minutes ago → CRITICAL: scanner likely dead</action>
+      <action>Check signal sequence: ENTRY → DCA → TP pattern should be logical</action>
+      <action>Report: PASS/FAIL with timestamps</action>
+    </step>
+
+    <step n="8" title="DCA Count Validation">
+      <action>Check pair_summaries for dca state</action>
+      <action>If any position has dca_fills_count &gt; 4 → CRITICAL: max DCA exceeded</action>
+      <action>Calculate expected margin: base_margin * sum of DCA multipliers used</action>
+      <action>Compare with actual margin used</action>
+      <action>Report: PASS/FAIL with numbers</action>
+    </step>
+
+    <step n="9" title="Balance Consistency">
+      <action>Check: initial_balance + realized_pnl ≈ current_balance (tolerance $1)</action>
+      <action>Check: bot uPnL ≈ Binance uPnL (tolerance $5)</action>
+      <action>Report: PASS/FAIL with values</action>
+    </step>
+
+    <step n="10" title="Generate Report">
+      <action>Compile all findings into structured report</action>
+      <action>Format:
+        === BOT HEALTH AUDIT REPORT ===
+        Timestamp: ...
+
+        [1] Position Sync: PASS/FAIL
+            Evidence: ...
+
+        [2] Order Validation: PASS/FAIL
+            Evidence: ...
+
+        [3] KC Band Alignment: PASS/FAIL
+            Evidence: ...
+
+        [4] Signal Health: PASS/FAIL
+            Evidence: ...
+
+        [5] DCA Count: PASS/FAIL
+            Evidence: ...
+
+        [6] Balance: PASS/FAIL
+            Evidence: ...
+
+        OVERALL: X/6 PASS
+        CRITICAL ISSUES: (list or "none")
+        WARNINGS: (list or "none")
+      </action>
+    </step>
+  </flow>
+</task>

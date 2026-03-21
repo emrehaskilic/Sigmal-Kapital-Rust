@@ -102,6 +102,11 @@ class RiskManager:
         self._max_dca_steps = trading.get("max_dca_steps", 1)
         self._tp_close_pct = trading.get("tp_close_pct", 0.05)
 
+        # Graduated DCA multipliers [0.50, 3.00, 3.75, 3.75]
+        self._dca_step_multipliers = trading.get("dca_step_multipliers", [])
+        # Graduated TP pcts [0.50, 0.80, 0.85, 0.90]
+        self._tp_step_pcts = trading.get("tp_step_pcts", [])
+
         # Hard stop (emergency backup — fixed at entry, H/L based)
         hard_stop_cfg = trading.get("hard_stop", {})
         self._hard_stop_enabled = hard_stop_cfg.get("enabled", False)
@@ -305,9 +310,22 @@ class RiskManager:
 
         return "", 0.0
 
+    def get_dca_multiplier(self, dca_step: int) -> float:
+        """Get graduated DCA margin multiplier for given step (0-indexed)."""
+        if self._dca_step_multipliers and dca_step < len(self._dca_step_multipliers):
+            return self._dca_step_multipliers[dca_step]
+        return 1.0
+
+    def get_tp_close_pct(self, dca_fills: int) -> float:
+        """Get graduated TP close percentage for given DCA fill count (1-indexed)."""
+        if self._tp_step_pcts and dca_fills > 0 and dca_fills <= len(self._tp_step_pcts):
+            return self._tp_step_pcts[dca_fills - 1]
+        return self._tp_close_pct
+
     def process_dca_fill(self, pos: PositionState, fill_price: float) -> None:
-        """DCA limit order filled — recalculate average entry."""
-        step_notional = pos.margin_per_step * pos.leverage
+        """DCA limit order filled — recalculate average entry with graduated multiplier."""
+        dca_mult = self.get_dca_multiplier(pos.dca_fills_count)
+        step_notional = pos.margin_per_step * pos.leverage * dca_mult
         old_total = pos.total_position_notional
         new_total = old_total + step_notional
 
@@ -327,8 +345,9 @@ class RiskManager:
         )
 
     def process_tp_fill(self, pos: PositionState, fill_price: float) -> float:
-        """TP limit order filled — close tp_close_pct of position. Returns closed notional."""
-        closed_notional = pos.total_position_notional * self._tp_close_pct
+        """TP limit order filled — close graduated pct of position. Returns closed notional."""
+        tp_pct = self.get_tp_close_pct(pos.dca_fills_count)
+        closed_notional = pos.total_position_notional * tp_pct
         pos.total_position_notional -= closed_notional
         pos.dca_fills_count = max(0, pos.dca_fills_count - 1)
         pos.dca_wave_sold += 1

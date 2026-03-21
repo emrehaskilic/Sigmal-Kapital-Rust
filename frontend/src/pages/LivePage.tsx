@@ -8,20 +8,117 @@ import {
   liveStop,
   liveStatus,
   liveEmergencyClose,
+  liveOrderHistory,
   liveGetExchangePositions,
-  liveUpdateProtection,
-  liveResetCircuitBreaker,
+  monitorCreateToken,
+  monitorListTokens,
+  monitorDeleteToken,
 } from "../api";
 import { MetricTile } from "../components/MetricTile";
 import { Badge } from "../components/Badge";
 import { PositionTable } from "../components/PositionTable";
 import { PairGrid } from "../components/PairGrid";
 import { TradeTable } from "../components/TradeTable";
+import { PMaxChart } from "../components/PMaxChart";
 import { formatNum, pnlColor } from "../utils";
 
 interface PairConfig {
   margin: number;
   leverage: number;
+}
+
+/* ── Multi-Pair Chart with Tab/Grid Layout ── */
+function MultiPairChart({ symbols, botRunning }: { symbols: string[]; botRunning: boolean }) {
+  const [activeTab, setActiveTab] = useState<string>(symbols[0] || "");
+  const [viewMode, setViewMode] = useState<"tabs" | "grid">("tabs");
+
+  // Sync active tab when symbols change
+  useEffect(() => {
+    if (symbols.length > 0 && !symbols.includes(activeTab)) {
+      setActiveTab(symbols[0]);
+    }
+  }, [symbols, activeTab]);
+
+  if (symbols.length === 0) return null;
+
+  return (
+    <div className="space-y-2">
+      {/* Controls bar */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* View mode toggle */}
+          <div className="flex rounded-lg overflow-hidden border border-blue-500/[0.08]">
+            <button
+              onClick={() => setViewMode("tabs")}
+              className={`px-3 py-1 text-[10px] font-semibold transition-colors ${
+                viewMode === "tabs"
+                  ? "bg-sky-500/15 text-sky-400"
+                  : "bg-[#0a1628] text-slate-500 hover:text-slate-300"
+              }`}
+            >
+              Tab
+            </button>
+            <button
+              onClick={() => setViewMode("grid")}
+              className={`px-3 py-1 text-[10px] font-semibold transition-colors ${
+                viewMode === "grid"
+                  ? "bg-sky-500/15 text-sky-400"
+                  : "bg-[#0a1628] text-slate-500 hover:text-slate-300"
+              }`}
+            >
+              Grid
+            </button>
+          </div>
+
+          {/* Pair tabs — only in tab mode */}
+          {viewMode === "tabs" && symbols.map((sym) => (
+            <button
+              key={sym}
+              onClick={() => setActiveTab(sym)}
+              className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-all ${
+                sym === activeTab
+                  ? "bg-teal-500/15 text-teal-400 ring-1 ring-teal-500/20"
+                  : "bg-[#0a1628] text-slate-500 hover:text-slate-300 hover:bg-[#0d1e38]"
+              }`}
+            >
+              {sym.replace("USDT", "")}
+            </button>
+          ))}
+        </div>
+        <span className="text-[10px] text-slate-500">{symbols.length} pair aktif</span>
+      </div>
+
+      {/* Tab mode — single chart */}
+      {viewMode === "tabs" && (
+        <PMaxChart
+          key={activeTab}
+          symbol={activeTab}
+          botRunning={botRunning}
+          title={`${activeTab} — Trend Inventory`}
+          mode="live"
+        />
+      )}
+
+      {/* Grid mode — all charts */}
+      {viewMode === "grid" && (
+        <div className={`grid gap-3 ${
+          symbols.length === 1 ? "grid-cols-1" :
+          symbols.length <= 4 ? "grid-cols-1 lg:grid-cols-2" :
+          "grid-cols-1 lg:grid-cols-2 xl:grid-cols-3"
+        }`}>
+          {symbols.map((sym) => (
+            <PMaxChart
+              key={sym}
+              symbol={sym}
+              botRunning={botRunning}
+              title={`${sym} — Trend Inventory`}
+              mode="live"
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function LivePage() {
@@ -36,36 +133,42 @@ export default function LivePage() {
   const [balance, setBalance] = useState(0);
   const [available, setAvailable] = useState(0);
 
+  // Config from settings.yaml
+  const [defaultMargin, setDefaultMargin] = useState(300);
+  const [defaultLeverage, setDefaultLeverage] = useState(25);
+
   // Pair selection & config
   const [allSymbols, setAllSymbols] = useState<string[]>([]);
   const [selectedPairs, setSelectedPairs] = useState<string[]>([]);
   const [pairConfigs, setPairConfigs] = useState<Record<string, PairConfig>>({});
   const [searchQuery, setSearchQuery] = useState("");
 
-  // Strategy settings
-  const [useAlternateSignals, setUseAlternateSignals] = useState(true);
-  const [alternateMultiplier, setAlternateMultiplier] = useState(8);
-
-  // Protection settings
-  const [maxDrawdown, setMaxDrawdown] = useState(40);
-  const [maxMarginPct, setMaxMarginPct] = useState(70);
-  const [maxPositions, setMaxPositions] = useState(5);
+  // Protection values from settings.yaml (read-only)
 
   // Live state
   const [liveRunning, setLiveRunning] = useState(false);
   const [status, setStatus] = useState<any>(null);
+  const [orderHistory, setOrderHistory] = useState<any>(null);
+  const [showOrderHistory, setShowOrderHistory] = useState(false);
   const [loading, setLoading] = useState(false);
   const [exchangePositions, setExchangePositions] = useState<any[]>([]);
   const pollRef = useRef<number | null>(null);
 
-  // Load symbols and config on mount
+  // Monitor tokens
+  const [monitorTokens, setMonitorTokens] = useState<{ token: string; created_at: number }[]>([]);
+  const [monitorCopied, setMonitorCopied] = useState("");
+
+  // Load symbols, config, and monitor tokens on mount
   useEffect(() => {
     fetchSymbols().then((d) => setAllSymbols(d.symbols));
     fetchConfig().then((cfg) => {
-      if (cfg?.strategy) {
-        setUseAlternateSignals(cfg.strategy.use_alternate_signals ?? true);
-        setAlternateMultiplier(cfg.strategy.alternate_multiplier ?? 8);
+      if (cfg?.trading) {
+        setDefaultMargin(cfg.trading.margin_per_trade ?? 300);
+        setDefaultLeverage(cfg.trading.leverage ?? 25);
       }
+    });
+    monitorListTokens().then((d) => {
+      if (d.tokens) setMonitorTokens(d.tokens);
     });
   }, []);
 
@@ -111,7 +214,7 @@ export default function LivePage() {
     setSelectedPairs((prev) => [...prev, sym]);
     setPairConfigs((prev) => ({
       ...prev,
-      [sym]: { margin: 50, leverage: 10 },
+      [sym]: { margin: defaultMargin, leverage: defaultLeverage },
     }));
     setSearchQuery("");
   };
@@ -142,14 +245,13 @@ export default function LivePage() {
       setExchangePositions(posRes.positions);
     }
 
-    const res = await liveStart(pairConfigs, {
-      max_drawdown_pct: maxDrawdown,
-      max_total_margin_pct: maxMarginPct,
-      max_open_positions: maxPositions,
-    }, {
-      use_alternate_signals: useAlternateSignals,
-      alternate_multiplier: alternateMultiplier,
-    });
+    const finalConfigs: Record<string, PairConfig> = {};
+    for (const sym of selectedPairs) {
+      const pc = pairConfigs[sym] || { margin: defaultMargin, leverage: defaultLeverage };
+      finalConfigs[sym] = { margin: pc.margin, leverage: pc.leverage };
+    }
+
+    const res = await liveStart(finalConfigs);
     if (res.error) {
       setKeysError(res.error);
       setLoading(false);
@@ -171,16 +273,23 @@ export default function LivePage() {
     alert(`${res.trades_closed || 0} pozisyon kapatildi.`);
   };
 
-  const handleUpdateProtection = async () => {
-    await liveUpdateProtection({
-      max_drawdown_pct: maxDrawdown,
-      max_total_margin_pct: maxMarginPct,
-      max_open_positions: maxPositions,
-    });
+  const handleCreateMonitorLink = async () => {
+    const res = await monitorCreateToken();
+    if (res.token) {
+      setMonitorTokens((prev) => [...prev, { token: res.token, created_at: Date.now() / 1000 }]);
+    }
   };
 
-  const handleResetCircuitBreaker = async () => {
-    await liveResetCircuitBreaker();
+  const handleDeleteMonitorToken = async (token: string) => {
+    await monitorDeleteToken(token);
+    setMonitorTokens((prev) => prev.filter((t) => t.token !== token));
+  };
+
+  const handleCopyMonitorLink = (token: string) => {
+    const url = `${window.location.origin}/sigmakapital/${token}`;
+    navigator.clipboard.writeText(url);
+    setMonitorCopied(token);
+    setTimeout(() => setMonitorCopied(""), 2000);
   };
 
   // Filtered symbols for search
@@ -196,7 +305,7 @@ export default function LivePage() {
 
   // Total margin allocation
   const totalMarginAllocated = selectedPairs.reduce(
-    (sum, sym) => sum + (pairConfigs[sym]?.margin || 0),
+    (sum, sym) => sum + (pairConfigs[sym]?.margin || defaultMargin),
     0
   );
 
@@ -236,7 +345,7 @@ export default function LivePage() {
         </div>
 
         {/* ── API Keys Section ── */}
-        {!keysValid && !liveRunning && (
+        {!liveRunning && (
           <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4 space-y-3">
             <h2 className="text-sm font-semibold text-slate-300">Binance API Anahtarlari</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -265,8 +374,14 @@ export default function LivePage() {
               <button onClick={handleSetKeys}
                 disabled={!apiKey || !apiSecret}
                 className="px-4 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 hover:bg-emerald-500/25 transition-colors disabled:opacity-30">
-                Baglan
+                {keysValid ? "Yeniden Baglan" : "Baglan"}
               </button>
+              {keysValid && (
+                <span className="flex items-center gap-1.5 text-[10px] text-emerald-400">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  Bagli
+                </span>
+              )}
             </div>
             {keysError && (
               <div className="text-xs text-red-400 bg-red-500/10 rounded-lg px-3 py-2">{keysError}</div>
@@ -301,31 +416,6 @@ export default function LivePage() {
           </div>
         )}
 
-        {/* ── Strategy Settings ── */}
-        {keysValid && !liveRunning && (
-          <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4 space-y-3">
-            <h2 className="text-sm font-semibold text-slate-300">Strateji Ayarlari</h2>
-            <div className="flex items-center gap-4">
-              <label className="space-y-0.5 flex flex-col">
-                <span className="text-slate-500 text-[10px] uppercase">Alternate Signals</span>
-                <div className="flex items-center gap-2 h-[30px]">
-                  <input type="checkbox"
-                    checked={useAlternateSignals}
-                    onChange={(e) => setUseAlternateSignals(e.target.checked)}
-                    className="w-4 h-4 accent-sky-500 bg-[#050a14] border-blue-500/[0.08] rounded" />
-                  <span className="text-slate-400 text-[11px]">{useAlternateSignals ? "ON" : "OFF"}</span>
-                  {useAlternateSignals && (
-                    <input type="number" step="1" min="1"
-                      value={alternateMultiplier}
-                      onChange={(e) => setAlternateMultiplier(+e.target.value)}
-                      className="w-12 bg-[#050a14] border border-blue-500/[0.08] rounded px-1.5 py-0.5 text-xs font-mono text-slate-200" />
-                  )}
-                </div>
-              </label>
-            </div>
-          </div>
-        )}
-
         {/* ── Pair Selection & Config ── */}
         {keysValid && !liveRunning && (
           <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4 space-y-4">
@@ -352,7 +442,7 @@ export default function LivePage() {
               )}
             </div>
 
-            {/* Per-pair config table */}
+            {/* Per-pair config table — sadece margin, leverage sabit */}
             {selectedPairs.length > 0 && (
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
@@ -367,7 +457,7 @@ export default function LivePage() {
                   </thead>
                   <tbody>
                     {selectedPairs.map((sym) => {
-                      const pc = pairConfigs[sym] || { margin: 50, leverage: 10 };
+                      const pc = pairConfigs[sym] || { margin: defaultMargin, leverage: defaultLeverage };
                       return (
                         <tr key={sym} className="border-b border-blue-500/[0.06]">
                           <td className="py-2 px-2 font-semibold text-slate-200">{sym}</td>
@@ -402,108 +492,7 @@ export default function LivePage() {
           </div>
         )}
 
-        {/* ── Account Protection Settings ── */}
-        {keysValid && (
-          <div className="bg-[#0a1628] rounded-xl border border-amber-500/20 p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-amber-400">Hesap Koruma Ayarlari</h2>
-              {liveRunning && (
-                <button onClick={handleUpdateProtection}
-                  className="px-3 py-1 rounded-lg text-[10px] font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/25 hover:bg-amber-500/25 transition-colors">
-                  Guncelle
-                </button>
-              )}
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <label className="space-y-1">
-                <span className="text-slate-400 text-[10px] uppercase">Max Drawdown (%)</span>
-                <div className="flex items-center gap-2">
-                  <input type="range" min="5" max="80" step="5"
-                    value={maxDrawdown}
-                    onChange={(e) => setMaxDrawdown(+e.target.value)}
-                    className="flex-1 accent-amber-500 h-1.5" />
-                  <input type="number" min="5" max="80" step="5"
-                    value={maxDrawdown}
-                    onChange={(e) => setMaxDrawdown(+e.target.value)}
-                    className="w-16 bg-[#050a14] border border-blue-500/[0.08] rounded px-2 py-1 text-center text-xs font-mono text-amber-400" />
-                </div>
-                <span className="text-[9px] text-slate-500">Bakiye %{maxDrawdown} duserse yeni islem durdurulur</span>
-              </label>
-              <label className="space-y-1">
-                <span className="text-slate-400 text-[10px] uppercase">Max Toplam Margin (%)</span>
-                <div className="flex items-center gap-2">
-                  <input type="range" min="10" max="100" step="5"
-                    value={maxMarginPct}
-                    onChange={(e) => setMaxMarginPct(+e.target.value)}
-                    className="flex-1 accent-amber-500 h-1.5" />
-                  <input type="number" min="10" max="100" step="5"
-                    value={maxMarginPct}
-                    onChange={(e) => setMaxMarginPct(+e.target.value)}
-                    className="w-16 bg-[#050a14] border border-blue-500/[0.08] rounded px-2 py-1 text-center text-xs font-mono text-amber-400" />
-                </div>
-                <span className="text-[9px] text-slate-500">Tum pozisyonlarin toplam margin'i bakiyenin %{maxMarginPct}'ini asamaz</span>
-              </label>
-              <label className="space-y-1">
-                <span className="text-slate-400 text-[10px] uppercase">Max Acik Pozisyon</span>
-                <div className="flex items-center gap-2">
-                  <input type="range" min="1" max="20" step="1"
-                    value={maxPositions}
-                    onChange={(e) => setMaxPositions(+e.target.value)}
-                    className="flex-1 accent-amber-500 h-1.5" />
-                  <input type="number" min="1" max="20" step="1"
-                    value={maxPositions}
-                    onChange={(e) => setMaxPositions(+e.target.value)}
-                    className="w-16 bg-[#050a14] border border-blue-500/[0.08] rounded px-2 py-1 text-center text-xs font-mono text-amber-400" />
-                </div>
-                <span className="text-[9px] text-slate-500">Ayni anda en fazla {maxPositions} pozisyon acik olabilir</span>
-              </label>
-            </div>
-
-            {/* Circuit Breaker Alert */}
-            {liveRunning && stats?.circuit_breaker && (
-              <div className="mt-2 bg-red-500/10 border border-red-500/30 rounded-lg p-3 flex items-center justify-between">
-                <div>
-                  <span className="text-xs font-semibold text-red-400">CIRCUIT BREAKER AKTIF</span>
-                  <p className="text-[10px] text-red-300 mt-0.5">{stats.circuit_breaker_reason}</p>
-                </div>
-                <button onClick={handleResetCircuitBreaker}
-                  className="px-3 py-1.5 rounded-lg text-[10px] font-semibold bg-red-500/15 text-red-400 border border-red-500/25 hover:bg-red-500/25 transition-colors">
-                  Sifirla
-                </button>
-              </div>
-            )}
-
-            {/* Live Protection Stats */}
-            {liveRunning && stats && (
-              <div className="grid grid-cols-3 gap-2 mt-2">
-                <div className="bg-[#050a14]/60 rounded-lg px-3 py-2 text-center">
-                  <div className="text-[9px] text-slate-500 uppercase">Drawdown</div>
-                  <div className={`text-sm font-mono font-semibold ${
-                    stats.drawdown_pct > maxDrawdown * 0.7 ? "text-red-400" : "text-slate-200"
-                  }`}>
-                    %{formatNum(stats.drawdown_pct, 1)} <span className="text-[9px] text-slate-500">/ %{maxDrawdown}</span>
-                  </div>
-                </div>
-                <div className="bg-[#050a14]/60 rounded-lg px-3 py-2 text-center">
-                  <div className="text-[9px] text-slate-500 uppercase">Acik Pozisyon</div>
-                  <div className={`text-sm font-mono font-semibold ${
-                    stats.open_positions >= maxPositions ? "text-red-400" : "text-slate-200"
-                  }`}>
-                    {stats.open_positions} <span className="text-[9px] text-slate-500">/ {maxPositions}</span>
-                  </div>
-                </div>
-                <div className="bg-[#050a14]/60 rounded-lg px-3 py-2 text-center">
-                  <div className="text-[9px] text-slate-500 uppercase">Sync Uyarilari</div>
-                  <div className={`text-sm font-mono font-semibold ${
-                    (stats.sync_warnings?.length || 0) > 0 ? "text-yellow-400" : "text-slate-200"
-                  }`}>
-                    {stats.sync_warnings?.length || 0}
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
+        {/* Account protection values come from settings.yaml */}
 
         {/* ── Exchange Positions (shown on start, before signals) ── */}
         {liveRunning && exchangePositions.length > 0 && !status?.positions?.length && (
@@ -610,13 +599,18 @@ export default function LivePage() {
                   </div>
                   {pair.pair_state === "OBSERVING" && (
                     <div className="mt-2 text-[9px] text-yellow-400/70">
-                      Ilk sinyal bekleniyor — reversal geldiginde islem baslar
+                      Sinyal bekleniyor — trend degisiminde pozisyon acilacak
                     </div>
                   )}
                 </div>
               ))}
             </div>
           </div>
+        )}
+
+        {/* ── Trend Inventory Charts — Multi-Pair Tabs ── */}
+        {liveRunning && status?.active_symbols?.length > 0 && (
+          <MultiPairChart symbols={status.active_symbols} botRunning={liveRunning} />
         )}
 
         {/* ── Open Positions ── */}
@@ -672,6 +666,163 @@ export default function LivePage() {
           </div>
         )}
 
+        {/* ── Order History ── */}
+        {liveRunning && (
+          <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-semibold text-slate-300">Emir Gecmisi</h2>
+              <button
+                onClick={async () => {
+                  if (!showOrderHistory) {
+                    try {
+                      const data = await liveOrderHistory();
+                      setOrderHistory(data);
+                    } catch {}
+                  }
+                  setShowOrderHistory(!showOrderHistory);
+                }}
+                className="px-3 py-1 rounded-lg text-[11px] font-semibold bg-sky-500/15 text-sky-400 border border-sky-500/25 hover:bg-sky-500/25 transition-colors">
+                {showOrderHistory ? "Gizle" : "Goster"}
+              </button>
+            </div>
+            {showOrderHistory && orderHistory && (
+              <div className="space-y-4">
+                {/* Market Entries */}
+                {orderHistory.market_entries?.length > 0 && (
+                  <div>
+                    <h3 className="text-[11px] font-semibold text-emerald-400 mb-2 uppercase tracking-wider">Market Emirleri (Entry)</h3>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-blue-500/[0.08]">
+                            <th className="text-left py-1.5 px-2">ID</th>
+                            <th className="text-center py-1.5">Side</th>
+                            <th className="text-right py-1.5 px-2">Qty</th>
+                            <th className="text-right py-1.5 px-2">Avg Price</th>
+                            <th className="text-center py-1.5">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {orderHistory.market_entries.map((o: any) => (
+                            <tr key={o.orderId} className="border-b border-blue-500/[0.06]">
+                              <td className="py-1 px-2 text-slate-500 font-mono">{o.orderId}</td>
+                              <td className="py-1 text-center"><span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${o.side === "BUY" ? "bg-emerald-400/15 text-emerald-400" : "bg-red-400/15 text-red-400"}`}>{o.side}</span></td>
+                              <td className="py-1 px-2 text-right font-mono">{o.executedQty}</td>
+                              <td className="py-1 px-2 text-right font-mono">{formatNum(o.avgPrice, 4)}</td>
+                              <td className="py-1 text-center"><span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${o.status === "FILLED" ? "bg-emerald-400/15 text-emerald-400" : "bg-yellow-400/15 text-yellow-400"}`}>{o.status}</span></td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* DCA Orders */}
+                {orderHistory.dca_orders?.length > 0 && (
+                  <div>
+                    <h3 className="text-[11px] font-semibold text-sky-400 mb-2 uppercase tracking-wider">DCA Emirleri</h3>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-blue-500/[0.08]">
+                            <th className="text-left py-1.5 px-2">ID</th>
+                            <th className="text-center py-1.5">Side</th>
+                            <th className="text-right py-1.5 px-2">Qty</th>
+                            <th className="text-right py-1.5 px-2">Fiyat</th>
+                            <th className="text-right py-1.5 px-2">Avg Fill</th>
+                            <th className="text-center py-1.5">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {orderHistory.dca_orders.map((o: any) => (
+                            <tr key={o.orderId} className="border-b border-blue-500/[0.06]">
+                              <td className="py-1 px-2 text-slate-500 font-mono">{o.orderId}</td>
+                              <td className="py-1 text-center"><span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${o.side === "BUY" ? "bg-emerald-400/15 text-emerald-400" : "bg-red-400/15 text-red-400"}`}>{o.side}</span></td>
+                              <td className="py-1 px-2 text-right font-mono">{o.origQty}</td>
+                              <td className="py-1 px-2 text-right font-mono">{formatNum(o.price, 4)}</td>
+                              <td className="py-1 px-2 text-right font-mono">{o.avgPrice > 0 ? formatNum(o.avgPrice, 4) : "-"}</td>
+                              <td className="py-1 text-center"><span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${o.status === "FILLED" ? "bg-emerald-400/15 text-emerald-400" : o.status === "NEW" ? "bg-yellow-400/15 text-yellow-400" : "bg-slate-400/15 text-slate-400"}`}>{o.status}</span></td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* TP Orders */}
+                {orderHistory.tp_orders?.length > 0 && (
+                  <div>
+                    <h3 className="text-[11px] font-semibold text-orange-400 mb-2 uppercase tracking-wider">TP Emirleri</h3>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-blue-500/[0.08]">
+                            <th className="text-left py-1.5 px-2">ID</th>
+                            <th className="text-center py-1.5">Side</th>
+                            <th className="text-right py-1.5 px-2">Qty</th>
+                            <th className="text-right py-1.5 px-2">Fiyat</th>
+                            <th className="text-right py-1.5 px-2">Avg Fill</th>
+                            <th className="text-center py-1.5">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {orderHistory.tp_orders.map((o: any) => (
+                            <tr key={o.orderId} className="border-b border-blue-500/[0.06]">
+                              <td className="py-1 px-2 text-slate-500 font-mono">{o.orderId}</td>
+                              <td className="py-1 text-center"><span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${o.side === "SELL" ? "bg-red-400/15 text-red-400" : "bg-emerald-400/15 text-emerald-400"}`}>{o.side}</span></td>
+                              <td className="py-1 px-2 text-right font-mono">{o.origQty}</td>
+                              <td className="py-1 px-2 text-right font-mono">{formatNum(o.price, 4)}</td>
+                              <td className="py-1 px-2 text-right font-mono">{o.avgPrice > 0 ? formatNum(o.avgPrice, 4) : "-"}</td>
+                              <td className="py-1 text-center"><span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${o.status === "FILLED" ? "bg-emerald-400/15 text-emerald-400" : o.status === "NEW" ? "bg-yellow-400/15 text-yellow-400" : "bg-slate-400/15 text-slate-400"}`}>{o.status}</span></td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* Completed Trades (PnL) */}
+                {orderHistory.trades?.length > 0 && (
+                  <div>
+                    <h3 className="text-[11px] font-semibold text-purple-400 mb-2 uppercase tracking-wider">Tamamlanan Islemler</h3>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-blue-500/[0.08]">
+                            <th className="text-left py-1.5 px-2">Symbol</th>
+                            <th className="text-center py-1.5">Side</th>
+                            <th className="text-right py-1.5 px-2">Entry</th>
+                            <th className="text-right py-1.5 px-2">Exit</th>
+                            <th className="text-center py-1.5">Reason</th>
+                            <th className="text-right py-1.5 px-2">PnL</th>
+                            <th className="text-right py-1.5 px-2">Fee</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {orderHistory.trades.map((t: any, i: number) => (
+                            <tr key={i} className="border-b border-blue-500/[0.06]">
+                              <td className="py-1 px-2 font-semibold">{t.symbol}</td>
+                              <td className="py-1 text-center"><span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${t.side === "LONG" ? "bg-emerald-400/15 text-emerald-400" : "bg-red-400/15 text-red-400"}`}>{t.side}</span></td>
+                              <td className="py-1 px-2 text-right font-mono">{formatNum(t.entry_price, 4)}</td>
+                              <td className="py-1 px-2 text-right font-mono">{formatNum(t.exit_price, 4)}</td>
+                              <td className="py-1 text-center text-slate-400">{t.exit_reason}</td>
+                              <td className={`py-1 px-2 text-right font-mono font-semibold ${t.pnl_usdt >= 0 ? "text-emerald-400" : "text-red-400"}`}>${formatNum(t.pnl_usdt, 4)}</td>
+                              <td className="py-1 px-2 text-right font-mono text-slate-500">${formatNum(t.fee_usdt, 4)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* ── Pair Configs (running mode) ── */}
         {liveRunning && status?.pair_configs && (
           <div className="bg-[#0a1628] rounded-xl border border-blue-500/[0.08] p-4">
@@ -684,6 +835,42 @@ export default function LivePage() {
                 </div>
               ))}
             </div>
+          </div>
+        )}
+
+        {/* ── Monitor Link Yönetimi ── */}
+        {liveRunning && (
+          <div className="bg-[#0a1628] rounded-xl border border-purple-500/20 p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-purple-400">Monitor Linkleri</h2>
+              <button onClick={handleCreateMonitorLink}
+                className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-purple-500/15 text-purple-400 border border-purple-500/25 hover:bg-purple-500/25 transition-colors">
+                Monitor Linki Olustur
+              </button>
+            </div>
+            {monitorTokens.length === 0 && (
+              <p className="text-[11px] text-slate-500">Henuz monitor linki olusturulmadi. Disaridan izlemek icin bir link olusturun.</p>
+            )}
+            {monitorTokens.map((mt) => {
+              const url = `${window.location.origin}/sigmakapital/${mt.token}`;
+              return (
+                <div key={mt.token} className="flex items-center gap-2 bg-[#050a14]/60 rounded-lg px-3 py-2">
+                  <span className="flex-1 text-[11px] font-mono text-slate-400 truncate">{url}</span>
+                  <button onClick={() => handleCopyMonitorLink(mt.token)}
+                    className={`px-2.5 py-1 rounded text-[10px] font-semibold transition-colors ${
+                      monitorCopied === mt.token
+                        ? "bg-emerald-500/15 text-emerald-400"
+                        : "bg-sky-500/15 text-sky-400 hover:bg-sky-500/25"
+                    }`}>
+                    {monitorCopied === mt.token ? "Kopyalandi!" : "Kopyala"}
+                  </button>
+                  <button onClick={() => handleDeleteMonitorToken(mt.token)}
+                    className="px-2.5 py-1 rounded text-[10px] font-semibold bg-red-500/15 text-red-400 hover:bg-red-500/25 transition-colors">
+                    Sil
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
 
