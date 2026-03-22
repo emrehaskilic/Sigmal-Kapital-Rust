@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import load_config
 from core.data.binance_rest import BinanceRest
-from core.data.binance_ws import BinanceWS, BinanceUserDataWS
+from core.data.binance_ws import BinanceWS, BinanceUserDataWS, DualUserDataWS
 from core.strategy.signals import SignalEngine
 from core.engine.simulator import Simulator, Trade
 from core.engine.backtester import Backtester
@@ -1025,13 +1025,64 @@ def get_chart_data(symbol: str = "BTCUSDT", limit: int = 500, source: str = "dry
         "dyncomp_enabled": cfg["strategy"].get("dynamic_comp", {}).get("enabled", False),
     }
 
+    # ── Live grid levels (DCA/TP/AVG lines from live executor) ──
+    live_grid_levels = []
+    if source == "live":
+        executor_gl: LiveExecutor | None = _live_state.get("executor")
+        if executor_gl:
+            for key, lpos in executor_gl.positions.items():
+                if lpos.condition == 0.0 or lpos.symbol != symbol:
+                    continue
+                # AVG entry
+                live_grid_levels.append({
+                    "price": lpos.average_entry_price,
+                    "label": f"AVG ({lpos.dca_fills_count} DCA)",
+                    "filled": True,
+                })
+                # Pending DCA
+                if lpos.pending_dca_price > 0:
+                    max_dca = cfg["trading"].get("max_dca_steps", 4)
+                    if lpos.dca_fills_count < max_dca:
+                        live_grid_levels.append({
+                            "price": lpos.pending_dca_price,
+                            "label": f"DCA{lpos.dca_fills_count + 1}",
+                            "filled": False,
+                        })
+                # Pending TP
+                if lpos.pending_tp_price > 0 and lpos.dca_fills_count > 0:
+                    live_grid_levels.append({
+                        "price": lpos.pending_tp_price,
+                        "label": "TP",
+                        "filled": False,
+                    })
+                # PCT hard stop
+                pct_cfg_l = cfg["trading"].get("pct_hard_stop", {})
+                if pct_cfg_l.get("enabled", False):
+                    loss_pct_l = pct_cfg_l.get("loss_pct", 2.5) / 100
+                    if lpos.side == "LONG":
+                        stop_p = lpos.average_entry_price * (1 - loss_pct_l)
+                    else:
+                        stop_p = lpos.average_entry_price * (1 + loss_pct_l)
+                    max_dca_l = cfg["trading"].get("max_dca_steps", 4)
+                    live_grid_levels.append({
+                        "price": stop_p,
+                        "label": f"STOP {pct_cfg_l.get('loss_pct', 2.5)}%"
+                                 + (" (aktif)" if lpos.dca_fills_count >= max_dca_l else ""),
+                        "filled": lpos.dca_fills_count >= max_dca_l,
+                    })
+
+    # Use live grid levels if available, otherwise dry-run
+    final_grid = live_grid_levels if live_grid_levels else (
+        grid_levels if sim and pos and pos.condition != 0.0 else []
+    )
+
     return {
         "symbol": symbol,
         "interval": chart_interval,
         "candles": candles,
         "markers": markers,
         "live_markers": live_markers,
-        "grid_levels": grid_levels if sim and pos and pos.condition != 0.0 else [],
+        "grid_levels": final_grid,
         "config_flags": config_flags,
     }
 
@@ -2143,28 +2194,29 @@ def _start_live_ws_loop(symbols: list[str]) -> None:
             await ws.subscribe_book_ticker(sym)
         logger.info("Live WS bookTicker subscribed for %d symbols", len(symbols))
 
-        # 2. User Data Stream WS (order fills)
+        # 2. User Data Stream WS (order fills) — DUAL redundant connections
         uds_ws = None
         listen_key = ""
         client = _live_state.get("client")
         if client:
             try:
                 listen_key = client.create_listen_key()
-                uds_ws = BinanceUserDataWS(
+                uds_ws = DualUserDataWS(
                     on_order_update=_on_order_update,
                     on_reconnect=_on_uds_reconnect,
                     testnet=is_testnet,
                 )
                 await uds_ws.connect(listen_key)
-                logger.info("[UDS] User Data Stream started")
+                logger.info("[UDS] Dual User Data Stream started (2 redundant connections)")
 
-                # Store UDS ref for executor WS health tracking
+                # Store UDS ref for executor WS health tracking + frontend status
                 with _live_lock:
                     executor = _live_state.get("executor")
                     if executor:
                         executor._ws_connected = True
+                    _live_state["_uds_ws"] = uds_ws
             except Exception as e:
-                logger.error("[UDS] Failed to start User Data Stream: %s", e)
+                logger.error("[UDS] Failed to start Dual User Data Stream: %s", e)
                 uds_ws = None
 
         # 3. ListenKey renewal (every 25 min) + 24h reconnect
@@ -2204,6 +2256,31 @@ def _start_live_ws_loop(symbols: list[str]) -> None:
         if uds_ws:
             asyncio.create_task(_renew_loop())
             asyncio.create_task(_daily_reconnect())
+
+        # 3b. REST Heartbeat — verify pending orders every 10s
+        async def _rest_heartbeat_loop():
+            while _live_state["running"]:
+                await asyncio.sleep(10)
+                if not _live_state["running"]:
+                    break
+                with _live_lock:
+                    executor = _live_state.get("executor")
+                    if executor:
+                        try:
+                            msgs = executor.rest_heartbeat()
+                            for m in msgs:
+                                _live_state["signal_log"].append({
+                                    "time": time.strftime("%H:%M:%S"),
+                                    "symbol": "SYSTEM",
+                                    "side": "SYNC",
+                                    "price": 0,
+                                    "rsi": 0,
+                                    "source": m,
+                                })
+                        except Exception as e:
+                            logger.error("[REST_HEARTBEAT] Error: %s", e)
+
+        asyncio.create_task(_rest_heartbeat_loop())
 
         # 4. Main loop — wait until live stopped
         while _live_state["running"]:
@@ -2725,6 +2802,57 @@ def live_status():
             "net_pnl": round(total_pnl, 4),
         },
         "pair_configs": _live_state.get("pair_configs", {}),
+        "ws_health": _build_ws_health(executor),
+    }
+
+
+def _build_ws_health(executor) -> dict:
+    """Build WS health metrics for frontend display."""
+    now = time.time()
+    ws_last = executor._ws_last_event_ts if executor else 0
+    ws_connected = executor._ws_connected if executor else False
+    silent_ms = int((now - ws_last) * 1000) if ws_last > 0 else -1
+
+    # Order state machine stats
+    pending_orders = []
+    total_tracked = 0
+    mismatches = 0
+    if executor and hasattr(executor, "_order_states"):
+        total_tracked = len(executor._order_states)
+        mismatches = sum(1 for o in executor._order_states.values() if o.mismatch)
+        for o in executor._order_states.values():
+            if o.status.value == "ACK":
+                pending_orders.append({
+                    "order_id": o.order_id,
+                    "symbol": o.symbol,
+                    "type": o.order_type,
+                    "side": o.side,
+                    "price": round(o.price, 4),
+                    "age_s": round(now - o.acked_at, 1),
+                    "last_verify_s": round(now - o.last_rest_verify, 1) if o.last_rest_verify > 0 else -1,
+                })
+
+    # UDS connection status
+    uds_connected = False
+    live_ws = _live_state.get("_uds_ws")
+    if live_ws and hasattr(live_ws, "connected"):
+        uds_connected = live_ws.connected
+
+    # Heartbeat stats
+    hb_last = executor._last_rest_heartbeat if executor and hasattr(executor, "_last_rest_heartbeat") else 0
+    hb_age_ms = int((now - hb_last) * 1000) if hb_last > 0 else -1
+
+    return {
+        "uds_connected": uds_connected or ws_connected,
+        "ws_last_event_ms": silent_ms,
+        "ws_status": "LIVE" if (ws_connected and silent_ms < 30000) else
+                     "STALE" if (ws_connected and silent_ms >= 30000) else
+                     "DISCONNECTED",
+        "heartbeat_age_ms": hb_age_ms,
+        "pending_orders": pending_orders,
+        "total_tracked_orders": total_tracked,
+        "mismatches": mismatches,
+        "watchdog_timeout_s": 30 if len(pending_orders) <= 5 else 60 if len(pending_orders) <= 20 else 120,
     }
 
 

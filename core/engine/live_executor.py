@@ -32,6 +32,40 @@ from core.strategy.signals import Signal
 logger = logging.getLogger("live_executor")
 
 
+class OrderStatus(str, Enum):
+    """Order lifecycle states."""
+    CREATED = "CREATED"      # code built the order, not yet sent
+    SENT = "SENT"            # API call fired, awaiting response
+    ACK = "ACK"              # exchange accepted (orderId received)
+    PARTIAL = "PARTIAL"      # partially filled
+    FILLED = "FILLED"        # fully filled (WS or REST confirmed)
+    CANCELED = "CANCELED"    # canceled by us or exchange
+    EXPIRED = "EXPIRED"      # TTL expired on exchange
+    REJECTED = "REJECTED"    # exchange rejected
+
+
+@dataclass
+class OrderState:
+    """Tracks a single order through its full lifecycle."""
+    order_id: int
+    symbol: str
+    side: str               # BUY / SELL
+    order_type: str         # ENTRY / DCA / TP / SL
+    price: float
+    qty: float
+    status: OrderStatus
+    pos_key: str            # link to position ("ETHUSDT:3m")
+    created_at: float = 0.0
+    sent_at: float = 0.0
+    acked_at: float = 0.0
+    filled_at: float = 0.0
+    fill_price: float = 0.0
+    fill_qty: float = 0.0
+    last_rest_verify: float = 0.0   # last REST verification timestamp
+    exchange_status: str = ""       # raw status from exchange
+    mismatch: bool = False          # local != exchange
+
+
 class PairState(str, Enum):
     """Per-pair operational state."""
     OBSERVING = "OBSERVING"  # watching, not trading yet
@@ -175,6 +209,14 @@ class LiveExecutor:
         # Fill event log (for debug endpoint, last 50)
         self._fill_log: list[dict] = []
 
+        # ── Order State Machine ──
+        # Every placed order gets a full lifecycle tracker.
+        # REST heartbeat only verifies orders in ACK state (pending fill).
+        self._order_states: dict[int, OrderState] = {}  # orderId → OrderState
+        # REST heartbeat interval (seconds)
+        self._rest_heartbeat_interval: float = 10.0
+        self._last_rest_heartbeat: float = 0.0
+
     @staticmethod
     def _pos_key(symbol: str, tf_label: str) -> str:
         return f"{symbol}:{tf_label}" if tf_label else symbol
@@ -185,6 +227,138 @@ class LiveExecutor:
     @property
     def positions(self) -> dict[str, PositionState]:
         return self._positions
+
+    # ------------------------------------------------------------------
+    # Order State Machine
+    # ------------------------------------------------------------------
+
+    def _track_order(
+        self, order_id: int, symbol: str, side: str,
+        order_type: str, price: float, qty: float, pos_key: str,
+    ) -> OrderState:
+        """Register a new order in the state machine (ACK state)."""
+        now = time.time()
+        os = OrderState(
+            order_id=order_id, symbol=symbol, side=side,
+            order_type=order_type, price=price, qty=qty,
+            status=OrderStatus.ACK, pos_key=pos_key,
+            created_at=now, sent_at=now, acked_at=now,
+        )
+        self._order_states[order_id] = os
+        # Prune old completed orders (keep last 500)
+        if len(self._order_states) > 600:
+            completed = [
+                oid for oid, o in self._order_states.items()
+                if o.status in (OrderStatus.FILLED, OrderStatus.CANCELED,
+                                OrderStatus.EXPIRED, OrderStatus.REJECTED)
+            ]
+            for oid in completed[:100]:
+                del self._order_states[oid]
+        return os
+
+    def _mark_order_filled(self, order_id: int, fill_price: float, fill_qty: float) -> None:
+        """Transition order to FILLED state."""
+        os = self._order_states.get(order_id)
+        if os:
+            os.status = OrderStatus.FILLED
+            os.filled_at = time.time()
+            os.fill_price = fill_price
+            os.fill_qty = fill_qty
+
+    def _mark_order_canceled(self, order_id: int) -> None:
+        """Transition order to CANCELED state."""
+        os = self._order_states.get(order_id)
+        if os:
+            os.status = OrderStatus.CANCELED
+
+    def _get_pending_orders(self) -> list[OrderState]:
+        """Return all orders in ACK state (awaiting fill — candidates for REST verify)."""
+        return [o for o in self._order_states.values() if o.status == OrderStatus.ACK]
+
+    def rest_heartbeat(self) -> list[str]:
+        """REST-based verification of all pending (ACK) orders.
+
+        Called periodically from server.py. Only polls orders that are
+        in ACK state — not FILLED, CANCELED, etc. Returns log messages.
+        """
+        now = time.time()
+        if now - self._last_rest_heartbeat < self._rest_heartbeat_interval:
+            return []
+        self._last_rest_heartbeat = now
+
+        msgs: list[str] = []
+        pending = self._get_pending_orders()
+        if not pending:
+            return msgs
+
+        for os in pending:
+            # Skip if recently verified (within 5 seconds)
+            if now - os.last_rest_verify < 5.0:
+                continue
+            os.last_rest_verify = now
+
+            try:
+                order = self._client.get_order(os.symbol, os.order_id)
+                exchange_status = order.get("status", "")
+                os.exchange_status = exchange_status
+
+                if exchange_status == "FILLED":
+                    # Mark state FIRST to prevent re-processing loop
+                    already_processed = os.order_id in self._processed_order_ids
+                    os.mismatch = True
+                    self._mark_order_filled(
+                        os.order_id,
+                        float(order.get("avgPrice", 0)),
+                        float(order.get("executedQty", 0)),
+                    )
+                    if not already_processed:
+                        # Missed fill — process it now
+                        msg = (
+                            f"[HEARTBEAT] {os.symbol} {os.order_type} #{os.order_id} "
+                            f"FILLED on exchange but local=ACK — processing missed fill"
+                        )
+                        logger.warning(msg)
+                        msgs.append(msg)
+                        self.process_order_fill({
+                            "orderId": os.order_id,
+                            "symbol": os.symbol,
+                            "avgPrice": float(order.get("avgPrice", 0)),
+                            "executedQty": float(order.get("executedQty", 0)),
+                        })
+                    else:
+                        # Already processed via WS/catch-up — just fix state
+                        msg = (
+                            f"[HEARTBEAT] {os.symbol} {os.order_type} #{os.order_id} "
+                            f"state fixed ACK->FILLED (already processed)"
+                        )
+                        logger.info(msg)
+                        msgs.append(msg)
+
+                elif exchange_status in ("CANCELED", "EXPIRED", "REJECTED"):
+                    os.status = OrderStatus(exchange_status)
+                    os.mismatch = True
+                    msg = (
+                        f"[HEARTBEAT] {os.symbol} {os.order_type} #{os.order_id} "
+                        f"is {exchange_status} on exchange — syncing local state"
+                    )
+                    logger.warning(msg)
+                    msgs.append(msg)
+                    # Clear the pending order reference in position
+                    pos = self._positions.get(os.pos_key)
+                    if pos:
+                        if os.order_type == "DCA" and pos.pending_dca_order_id == os.order_id:
+                            pos.pending_dca_order_id = 0
+                        elif os.order_type == "TP" and pos.tp_order_id == os.order_id:
+                            pos.tp_order_id = 0
+
+                # ACK confirmed — order still open, no mismatch
+                # (PARTIALLY_FILLED also OK, will fully fill eventually)
+
+            except Exception as e:
+                logger.error("[HEARTBEAT] Failed to verify %s #%d: %s",
+                             os.symbol, os.order_id, e)
+
+        return msgs
 
     # ------------------------------------------------------------------
     # Setup
@@ -569,9 +743,16 @@ class LiveExecutor:
             # Keep last 50 warnings
             self.sync_warnings = self.sync_warnings[-50:]
 
-        # ── WS Health Check ──
-        if self._ws_connected and time.time() - self._ws_last_event_ts > 300:
-            msg = "[WATCHDOG] WS silent for 5min — triggering catch-up poll"
+        # ── WS Health Check (adaptive watchdog) ──
+        active_count = sum(1 for p in self._positions.values() if p.condition != 0.0)
+        if active_count <= 5:
+            watchdog_timeout = 30
+        elif active_count <= 20:
+            watchdog_timeout = 60
+        else:
+            watchdog_timeout = 120
+        if self._ws_connected and time.time() - self._ws_last_event_ts > watchdog_timeout:
+            msg = f"[WATCHDOG] WS silent for {watchdog_timeout}s (pos={active_count}) — triggering catch-up poll"
             logger.warning(msg)
             warnings.append(msg)
             self._ws_connected = False
@@ -850,6 +1031,7 @@ class LiveExecutor:
         # Cancel existing DCA order — verify cancel succeeded
         if pos.pending_dca_order_id > 0:
             old_id = pos.pending_dca_order_id
+            self._mark_order_canceled(old_id)
             try:
                 cancel_result = self._client.cancel_order(symbol, old_id)
                 # Cancel succeeded — safe to clear
@@ -861,6 +1043,7 @@ class LiveExecutor:
                     order = self._client.get_order(symbol, old_id)
                     status = order.get("status", "")
                     if status == "FILLED":
+                        self._mark_order_filled(old_id, float(order.get("avgPrice", 0)), float(order.get("executedQty", 0)))
                         # Order filled before cancel — process directly (no recursion)
                         fill_p = float(order.get("avgPrice", 0))
                         fill_q = float(order.get("executedQty", 0))
@@ -904,6 +1087,7 @@ class LiveExecutor:
             # Register in order_id_map (WS fill events match from this map)
             if order_id > 0:
                 self._order_id_map[order_id] = (key, "DCA")
+                self._track_order(order_id, symbol, order_side, "DCA", price, qty, key)
 
             logger.info("[DCA_PLACED] %s %s qty=%.6f @ %.6f mult=%.2f orderId=%s status=%s",
                         symbol, order_side, qty, price, dca_mult, order_id, order_status)
@@ -946,17 +1130,17 @@ class LiveExecutor:
         if pos.dca_fills_count <= 0:
             return
 
-        # Backtest parity: max 1 TP per 3m candle
-        # Backtest elif parity: DCA fill olan mumda TP olmaz, TP fill olan mumda DCA olmaz
+        # Max 1 TP per 3m candle
         current_bucket = int(time.time()) // 180
         if self._last_tp_fill_bucket.get(key, 0) == current_bucket:
             return
-        if self._last_dca_fill_bucket.get(key, 0) == current_bucket:
-            return  # DCA fill olan mumda TP atlanir (elif)
+        # elif parity KALDIRILDI: DCA fill olan mumda TP konulabilir
+        # Backtest'te fark yok (dogrulanmis), live'da KC bounce yakalanir
 
         # Cancel existing TP order — verify cancel succeeded
         if pos.tp_order_id > 0:
             old_id = pos.tp_order_id
+            self._mark_order_canceled(old_id)
             try:
                 self._client.cancel_order(symbol, old_id)
                 pos.tp_order_id = 0
@@ -965,6 +1149,7 @@ class LiveExecutor:
                     order = self._client.get_order(symbol, old_id)
                     status = order.get("status", "")
                     if status == "FILLED":
+                        self._mark_order_filled(old_id, float(order.get("avgPrice", 0)), float(order.get("executedQty", 0)))
                         fill_p = float(order.get("avgPrice", 0))
                         fill_q = float(order.get("executedQty", 0))
                         if old_id not in self._processed_order_ids:
@@ -1017,6 +1202,7 @@ class LiveExecutor:
             # Register in order_id_map (WS fill events match from this map)
             if order_id > 0:
                 self._order_id_map[order_id] = (key, "TP")
+                self._track_order(order_id, symbol, close_side, "TP", price, tp_qty, key)
 
             logger.info("[TP_PLACED] %s %s qty=%.6f @ %.4f orderId=%s (%.0f%%) exchange_qty=%.6f status=%s",
                         symbol, close_side, tp_qty, price, order_id, tp_pct * 100, actual_qty, order_status)
@@ -1051,6 +1237,7 @@ class LiveExecutor:
                 # Register in order_id_map for WS fill detection
                 if order_id > 0:
                     self._order_id_map[order_id] = (key, "SL")
+                    self._track_order(order_id, symbol, close_side, "SL", pos.hard_stop_price, qty, key)
             logger.info(
                 "[SL_PLACED] %s %s qty=%.6f stop=%.4f orderId=%s",
                 symbol, close_side, qty, pos.hard_stop_price, order_id,
@@ -1064,6 +1251,7 @@ class LiveExecutor:
 
         # Cancel pending DCA order (KC-based approach)
         if pos.pending_dca_order_id > 0:
+            self._mark_order_canceled(pos.pending_dca_order_id)
             try:
                 self._client.cancel_order(symbol, pos.pending_dca_order_id)
                 logger.info("[CANCEL_DCA] %s pending orderId=%d", symbol, pos.pending_dca_order_id)
@@ -1074,6 +1262,7 @@ class LiveExecutor:
         # Cancel legacy DCA orders (grid-based approach)
         for dca in pos.dca_levels:
             if dca.order_id > 0 and not dca.filled:
+                self._mark_order_canceled(dca.order_id)
                 try:
                     self._client.cancel_order(symbol, dca.order_id)
                     logger.info("[CANCEL_DCA] %s L%d orderId=%d", symbol, dca.step, dca.order_id)
@@ -1083,6 +1272,7 @@ class LiveExecutor:
 
         # Cancel TP order
         if pos.tp_order_id > 0:
+            self._mark_order_canceled(pos.tp_order_id)
             try:
                 self._client.cancel_order(symbol, pos.tp_order_id)
                 logger.info("[CANCEL_TP] %s orderId=%d", symbol, pos.tp_order_id)
@@ -1225,6 +1415,9 @@ class LiveExecutor:
                          order_id, fill_price, fill_qty)
             return []
 
+        # Update order state machine
+        self._mark_order_filled(order_id, fill_price, fill_qty)
+
         trades: list[LiveTrade] = []
         if order_type == "DCA":
             self._process_dca_fill_live(pos_key, pos, fill_price, fill_qty, order_id)
@@ -1283,6 +1476,7 @@ class LiveExecutor:
         self._last_dca_fill_bucket[key] = candle_bucket
         # Cancel mevcut TP — DCA fill sonrasi yeni qty/fiyatla yeniden konulacak
         if pos.tp_order_id > 0:
+            self._mark_order_canceled(pos.tp_order_id)
             try:
                 self._client.cancel_order(pos.symbol, pos.tp_order_id)
                 logger.info("[DCA_CANCEL_TP] %s TP #%d cancelled (will replace with new qty)",
@@ -1354,6 +1548,7 @@ class LiveExecutor:
         self._last_tp_fill_bucket[key] = candle_bucket
         # Backtest elif: TP fill olan mumda DCA atlanir — mevcut DCA order'i cancel et
         if pos.pending_dca_order_id > 0:
+            self._mark_order_canceled(pos.pending_dca_order_id)
             try:
                 self._client.cancel_order(pos.symbol, pos.pending_dca_order_id)
                 logger.info("[TP_CANCEL_DCA] %s DCA #%d cancelled (elif parity — TP candle)",

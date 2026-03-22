@@ -20,6 +20,7 @@ import { PositionTable } from "../components/PositionTable";
 import { PairGrid } from "../components/PairGrid";
 import { TradeTable } from "../components/TradeTable";
 import { PMaxChart } from "../components/PMaxChart";
+import { WsHealthPanel } from "../components/WsHealthPanel";
 import { formatNum, pnlColor } from "../utils";
 
 interface PairConfig {
@@ -555,6 +556,11 @@ export default function LivePage() {
             <MetricTile label="Net PnL (- Fees)" value={`${formatNum(totals.net_pnl, 4, true)} USDT`} color={pnlColor(totals.net_pnl)} />
             <MetricTile label="Total Fees" value={`${formatNum(totals.total_fees, 4)} USDT`} color="text-slate-400" />
           </div>
+        )}
+
+        {/* ── WS & Order Health Panel ── */}
+        {liveRunning && status?.ws_health && (
+          <WsHealthPanel health={status.ws_health} />
         )}
 
         {/* ── Pair Grid with state indicators ── */}

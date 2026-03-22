@@ -56,7 +56,9 @@ class BinanceWS:
         """Auto-reconnect read loop."""
         while self._running:
             try:
-                async with websockets.connect(self._ws_base, ping_interval=20) as ws:
+                async with websockets.connect(
+                    self._ws_base, ping_interval=10, ping_timeout=3,
+                ) as ws:
                     self._ws = ws
                     # Re-subscribe on reconnect
                     if self._subscriptions:
@@ -65,11 +67,11 @@ class BinanceWS:
                     async for raw_msg in ws:
                         await self._handle_message(raw_msg)
             except websockets.ConnectionClosed:
-                logger.warning("WS connection closed, reconnecting in 3s...")
-                await asyncio.sleep(3)
+                logger.warning("WS connection closed, reconnecting in 1s...")
+                await asyncio.sleep(1)
             except Exception:
-                logger.exception("WS error, reconnecting in 5s...")
-                await asyncio.sleep(5)
+                logger.exception("WS error, reconnecting in 2s...")
+                await asyncio.sleep(2)
 
     # ------------------------------------------------------------------
     # Subscribe / Unsubscribe
@@ -224,7 +226,9 @@ class BinanceUserDataWS:
         while self._running:
             url = f"{self._ws_base}/{self._listen_key}"
             try:
-                async with websockets.connect(url, ping_interval=20) as ws:
+                async with websockets.connect(
+                    url, ping_interval=10, ping_timeout=3,
+                ) as ws:
                     self._ws = ws
                     self._connected = True
                     logger.info("[UDS_WS] Connected to User Data Stream")
@@ -241,12 +245,12 @@ class BinanceUserDataWS:
 
             except websockets.ConnectionClosed:
                 self._connected = False
-                logger.warning("[UDS_WS] Connection closed, reconnecting in 3s...")
-                await asyncio.sleep(3)
+                logger.warning("[UDS_WS] Connection closed, reconnecting in 1s...")
+                await asyncio.sleep(1)
             except Exception:
                 self._connected = False
-                logger.exception("[UDS_WS] Error, reconnecting in 5s...")
-                await asyncio.sleep(5)
+                logger.exception("[UDS_WS] Error, reconnecting in 2s...")
+                await asyncio.sleep(2)
 
     async def _handle_message(self, raw: str) -> None:
         data = json.loads(raw)
@@ -268,3 +272,40 @@ class BinanceUserDataWS:
                     await self._ws.close()
                 except Exception:
                     pass
+
+
+class DualUserDataWS:
+    """Redundant dual-connection UDS — two parallel BinanceUserDataWS instances.
+
+    Both connections receive the same events. Dedup is handled downstream
+    by LiveExecutor._processed_order_ids (already exists, zero extra code).
+    If one connection drops, the other keeps delivering events.
+    """
+
+    def __init__(
+        self,
+        on_order_update: OnOrderUpdateCallback,
+        on_reconnect: Callable[[], Coroutine[Any, Any, None]] | None = None,
+        testnet: bool = False,
+    ) -> None:
+        self._a = BinanceUserDataWS(on_order_update, on_reconnect, testnet)
+        self._b = BinanceUserDataWS(on_order_update, on_reconnect, testnet)
+
+    @property
+    def connected(self) -> bool:
+        return self._a.connected or self._b.connected
+
+    async def connect(self, listen_key: str) -> None:
+        await self._a.connect(listen_key)
+        await self._b.connect(listen_key)
+        logger.info("[DUAL_UDS] Both connections started")
+
+    async def reconnect(self, new_listen_key: str) -> None:
+        await self._a.reconnect(new_listen_key)
+        await self._b.reconnect(new_listen_key)
+        logger.info("[DUAL_UDS] Both connections reconnecting with new key")
+
+    async def close(self) -> None:
+        await self._a.close()
+        await self._b.close()
+        logger.info("[DUAL_UDS] Both connections closed")
