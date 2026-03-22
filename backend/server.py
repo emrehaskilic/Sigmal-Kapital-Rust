@@ -291,11 +291,10 @@ def start_bot(body: dict):
         return {"error": "No symbols provided"}
 
     state["active_symbols"] = symbols
-    state["bot_running"] = True
     state["ws_connected"] = True
     state["ws_last_ping"] = time.time()
 
-    # Reset simulator
+    # Reset simulator — bot_running set AFTER backfill to prevent scanner race
     cfg = state["config"]
     state["simulator"] = Simulator(cfg)
     sim = _get_sim()
@@ -421,6 +420,9 @@ def start_bot(body: dict):
 
     state["scan_results"] = scan_results
     state["signal_log"] = signal_log
+
+    # Backfill complete — NOW enable bot_running so scanner can start
+    state["bot_running"] = True
 
     # Start WS bookTicker stream in background thread
     _ws_book_data.clear()
@@ -713,40 +715,51 @@ def get_chart_data(symbol: str = "BTCUSDT", limit: int = 500, source: str = "dry
     if not tf_configs:
         return {"error": "No timeframes configured"}
     tf_cfg = tf_configs[0]
-    interval = tf_cfg.get("timeframe", "3m")
+    strategy_interval = tf_cfg.get("timeframe", "3m")
+    chart_interval = "1m"  # Chart always shows 1m candles
 
-    # Fetch klines
+    # Fetch 1m klines for chart display
     try:
-        klines = rest.fetch_klines_sync(symbol, interval, limit=limit)
+        klines_1m = rest.fetch_klines_sync(symbol, chart_interval, limit=limit)
     except Exception as e:
         return {"error": str(e)}
 
-    if len(klines) < 50:
+    if len(klines_1m) < 50:
         return {"error": "Insufficient data"}
 
-    df = pd.DataFrame(klines)
-    df["symbol"] = symbol
+    df_1m = pd.DataFrame(klines_1m)
+    df_1m["symbol"] = symbol
 
-    # Compute PMax (adaptive or static)
+    # Fetch strategy-timeframe klines for indicator calculation
+    # 1m limit / 3 = approximate 3m bars needed
+    strategy_limit = max(500, limit // 3 + 100)
+    try:
+        klines_strategy = rest.fetch_klines_sync(symbol, strategy_interval, limit=strategy_limit)
+    except Exception as e:
+        return {"error": str(e)}
+
+    df_strategy = pd.DataFrame(klines_strategy)
+
+    # Compute PMax from strategy timeframe (3m)
     from core.strategy.indicators import pmax as calc_pmax, adaptive_pmax as calc_adaptive_pmax
     pmax_cfg = tf_cfg.get("pmax", {})
     src_type = pmax_cfg.get("source", "hl2").lower()
     if src_type == "hl2":
-        src = (df["high"] + df["low"]) / 2
+        src = (df_strategy["high"] + df_strategy["low"]) / 2
     elif src_type == "hlc3":
-        src = (df["high"] + df["low"] + df["close"]) / 3
+        src = (df_strategy["high"] + df_strategy["low"] + df_strategy["close"]) / 3
     elif src_type == "ohlc4":
-        src = (df["open"] + df["high"] + df["low"] + df["close"]) / 4
+        src = (df_strategy["open"] + df_strategy["high"] + df_strategy["low"] + df_strategy["close"]) / 4
     else:
-        src = df["close"]
+        src = df_strategy["close"]
 
     if pmax_cfg.get("adaptive", False):
         pmax_line, mavg, direction = calc_adaptive_pmax(
-            src, df["high"], df["low"], df["close"], pmax_cfg,
+            src, df_strategy["high"], df_strategy["low"], df_strategy["close"], pmax_cfg,
         )
     else:
         pmax_line, mavg, direction = calc_pmax(
-            src, df["high"], df["low"], df["close"],
+            src, df_strategy["high"], df_strategy["low"], df_strategy["close"],
             atr_period=pmax_cfg.get("atr_period", 10),
             atr_multiplier=pmax_cfg.get("atr_multiplier", 3.0),
             ma_type=pmax_cfg.get("ma_type", "EMA"),
@@ -755,36 +768,50 @@ def get_chart_data(symbol: str = "BTCUSDT", limit: int = 500, source: str = "dry
             normalize_atr=pmax_cfg.get("normalize_atr", False),
         )
 
-    # Compute Keltner Channel
+    # Compute Keltner Channel from strategy timeframe (3m)
     from core.strategy.indicators import keltner_channel as calc_kc
     kc_cfg = tf_cfg.get("keltner", {})
     kc_mid, kc_upper_line, kc_lower_line = calc_kc(
-        df["high"], df["low"], df["close"],
+        df_strategy["high"], df_strategy["low"], df_strategy["close"],
         kc_length=kc_cfg.get("length", 20),
         kc_multiplier=kc_cfg.get("multiplier", 1.5),
         atr_period=kc_cfg.get("atr_period", 10),
     )
 
-    # Build candle data
-    candles = []
-    for i, row in df.iterrows():
-        t = int(row["open_time"]) // 1000
+    # Build lookup: 3m open_time → indicator values
+    indicator_map = {}
+    for i in range(len(df_strategy)):
+        t_3m = int(df_strategy["open_time"].iloc[i])
         pmax_val = float(pmax_line.iloc[i]) if not pd.isna(pmax_line.iloc[i]) else None
-        kc_upper_val = float(kc_upper_line.iloc[i]) if not pd.isna(kc_upper_line.iloc[i]) else None
-        kc_lower_val = float(kc_lower_line.iloc[i]) if not pd.isna(kc_lower_line.iloc[i]) else None
+        kc_u_val = float(kc_upper_line.iloc[i]) if not pd.isna(kc_upper_line.iloc[i]) else None
+        kc_l_val = float(kc_lower_line.iloc[i]) if not pd.isna(kc_lower_line.iloc[i]) else None
         mavg_val = float(kc_mid.iloc[i]) if not pd.isna(kc_mid.iloc[i]) else None
         dir_val = int(direction.iloc[i]) if not pd.isna(direction.iloc[i]) else 0
+        indicator_map[t_3m] = {
+            "pmax": pmax_val, "mavg": mavg_val,
+            "kc_upper": kc_u_val, "kc_lower": kc_l_val, "direction": dir_val,
+        }
+
+    # Map 1m candles to 3m indicators
+    # Each 1m candle belongs to a 3m bar: floor(1m_open_time / (3*60*1000)) * (3*60*1000)
+    strategy_ms = 3 * 60 * 1000  # 3 minutes in ms
+    candles = []
+    for i, row in df_1m.iterrows():
+        t_1m = int(row["open_time"])
+        t_3m_bucket = (t_1m // strategy_ms) * strategy_ms
+        indicators = indicator_map.get(t_3m_bucket, {})
+
         candles.append({
-            "time": t,
+            "time": t_1m // 1000,
             "open": float(row["open"]),
             "high": float(row["high"]),
             "low": float(row["low"]),
             "close": float(row["close"]),
-            "pmax": pmax_val,
-            "mavg": mavg_val,
-            "kc_upper": kc_upper_val,
-            "kc_lower": kc_lower_val,
-            "direction": dir_val,
+            "pmax": indicators.get("pmax"),
+            "mavg": indicators.get("mavg"),
+            "kc_upper": indicators.get("kc_upper"),
+            "kc_lower": indicators.get("kc_lower"),
+            "direction": indicators.get("direction", 0),
         })
 
     # Build trade markers from simulator
@@ -964,29 +991,9 @@ def get_chart_data(symbol: str = "BTCUSDT", limit: int = 500, source: str = "dry
                         "price": trade.exit_price,
                     })
 
-            # Live markers from signal log (DCA fills, TP fills)
-            for sig in _live_state.get("signal_log", []):
-                if sig.get("symbol") != symbol:
-                    continue
-                src = sig.get("source", "")
-                if "DCA" in src and "FILL" in src:
-                    live_markers.append({
-                        "time": int(time.time()),  # approximate
-                        "position": "aboveBar",
-                        "color": "#00ff88",
-                        "shape": "arrowDown",
-                        "text": src.replace("LIVE_", ""),
-                        "price": sig.get("price", 0),
-                    })
-                elif "TP_FILL" in src:
-                    live_markers.append({
-                        "time": int(time.time()),
-                        "position": "belowBar",
-                        "color": "#00ccff",
-                        "shape": "circle",
-                        "text": src.replace("LIVE_", ""),
-                        "price": sig.get("price", 0),
-                    })
+            # Live markers from signal log — REMOVED
+            # executor.trades already generates correct markers with proper timestamps.
+            # signal_log markers used int(time.time()) causing all fills to share one timestamp.
 
             # Live entry marker for open positions
             for key, pos in executor.positions.items():
@@ -1020,7 +1027,7 @@ def get_chart_data(symbol: str = "BTCUSDT", limit: int = 500, source: str = "dry
 
     return {
         "symbol": symbol,
-        "interval": interval,
+        "interval": chart_interval,
         "candles": candles,
         "markers": markers,
         "live_markers": live_markers,

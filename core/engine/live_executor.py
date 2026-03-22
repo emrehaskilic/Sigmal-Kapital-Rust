@@ -169,6 +169,9 @@ class LiveExecutor:
         # WS connection health (for watchdog)
         self._ws_connected: bool = False
         self._ws_last_event_ts: float = 0.0
+        # Last DCA/TP fill candle bucket — prevent multiple fills in same candle
+        self._last_dca_fill_bucket: dict[str, int] = {}  # pos_key → candle bucket
+        self._last_tp_fill_bucket: dict[str, int] = {}
         # Fill event log (for debug endpoint, last 50)
         self._fill_log: list[dict] = []
 
@@ -828,6 +831,13 @@ class LiveExecutor:
         if not pc or pos.pending_dca_price <= 0:
             return
 
+        # Backtest elif parity: max 1 DCA per 3m candle, DCA fill mumda TP olmaz ve tersi
+        current_bucket = int(time.time()) // 180
+        if self._last_dca_fill_bucket.get(key, 0) == current_bucket:
+            return  # Already had a DCA fill in this candle
+        if self._last_tp_fill_bucket.get(key, 0) == current_bucket:
+            return  # TP fill olan mumda DCA atlanir (elif)
+
         # Don't place DCA on dust positions
         current_qty = self._position_qty.get(key, 0)
         if current_qty > 0 and current_qty * pos.pending_dca_price < 10.0:
@@ -935,6 +945,14 @@ class LiveExecutor:
         # No TP at dca_count=0 — backtest behavior: TP only after DCA fill
         if pos.dca_fills_count <= 0:
             return
+
+        # Backtest parity: max 1 TP per 3m candle
+        # Backtest elif parity: DCA fill olan mumda TP olmaz, TP fill olan mumda DCA olmaz
+        current_bucket = int(time.time()) // 180
+        if self._last_tp_fill_bucket.get(key, 0) == current_bucket:
+            return
+        if self._last_dca_fill_bucket.get(key, 0) == current_bucket:
+            return  # DCA fill olan mumda TP atlanir (elif)
 
         # Cancel existing TP order — verify cancel succeeded
         if pos.tp_order_id > 0:
@@ -1260,6 +1278,18 @@ class LiveExecutor:
 
         self.total_fees += fill_qty * fill_price * self._maker_fee
         pos.pending_dca_order_id = 0
+        # Mark this candle as DCA-filled (prevent KC update from placing another)
+        candle_bucket = int(time.time()) // 180  # 3-minute bucket
+        self._last_dca_fill_bucket[key] = candle_bucket
+        # Cancel mevcut TP — DCA fill sonrasi yeni qty/fiyatla yeniden konulacak
+        if pos.tp_order_id > 0:
+            try:
+                self._client.cancel_order(pos.symbol, pos.tp_order_id)
+                logger.info("[DCA_CANCEL_TP] %s TP #%d cancelled (will replace with new qty)",
+                            pos.symbol, pos.tp_order_id)
+            except Exception:
+                pass
+            pos.tp_order_id = 0
         # Update qty: add fill_qty immediately, then try exchange sync
         self._position_qty[key] = self._position_qty.get(key, 0) + fill_qty
         self._sync_position_qty(key, pos)
@@ -1270,8 +1300,12 @@ class LiveExecutor:
                     self._position_qty.get(key, 0))
 
         if place_next_orders:
-            # Place TP for new position size (order must be on exchange)
+            # Place TP with new qty/price — but skip bucket guard (DCA fill triggers TP replace)
+            # Temporary clear bucket so _place_tp_order doesn't skip
+            saved_bucket = self._last_dca_fill_bucket.get(key, 0)
+            self._last_dca_fill_bucket[key] = 0
             self._place_tp_order(key, pos)
+            self._last_dca_fill_bucket[key] = saved_bucket
             # Do NOT place next DCA here — wait for next candle KC update
             # Backtest parity: each candle max 1 DCA (if block, not loop)
 
@@ -1315,6 +1349,18 @@ class LiveExecutor:
             trades.append(trade)
 
         pos.tp_order_id = 0
+        # Mark this candle as TP-filled (prevent KC update from placing another in same candle)
+        candle_bucket = int(time.time()) // 180
+        self._last_tp_fill_bucket[key] = candle_bucket
+        # Backtest elif: TP fill olan mumda DCA atlanir — mevcut DCA order'i cancel et
+        if pos.pending_dca_order_id > 0:
+            try:
+                self._client.cancel_order(pos.symbol, pos.pending_dca_order_id)
+                logger.info("[TP_CANCEL_DCA] %s DCA #%d cancelled (elif parity — TP candle)",
+                            pos.symbol, pos.pending_dca_order_id)
+            except Exception:
+                pass
+            pos.pending_dca_order_id = 0
         self._sync_position_qty(key, pos)
 
         # Check if remaining position is dust (< $10 notional) → close entirely

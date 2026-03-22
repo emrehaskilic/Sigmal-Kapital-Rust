@@ -126,20 +126,20 @@ export function PMaxChart({ symbol, botRunning, title, mode = "dryrun", liveMark
     });
 
     const kcUpper = chart.addLineSeries({
-      color: "#f59e0b40",
-      lineWidth: 1,
+      color: "#f59e0bcc",
+      lineWidth: 2,
       lineStyle: 2,
       priceLineVisible: false,
-      lastValueVisible: false,
+      lastValueVisible: true,
       crosshairMarkerVisible: false,
     });
 
     const kcLower = chart.addLineSeries({
-      color: "#f59e0b40",
-      lineWidth: 1,
+      color: "#f59e0bcc",
+      lineWidth: 2,
       lineStyle: 2,
       priceLineVisible: false,
-      lastValueVisible: false,
+      lastValueVisible: true,
       crosshairMarkerVisible: false,
     });
 
