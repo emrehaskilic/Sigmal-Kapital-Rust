@@ -2463,33 +2463,58 @@ def live_start(body: dict):
         try:
             tf_configs = cfg["strategy"].get("timeframes", [])
             interval = tf_configs[0].get("timeframe", "3m") if tf_configs else cfg["strategy"].get("timeframe", "3m")
-            klines = rest.fetch_klines_sync(sym, interval, limit=1500)
-            if len(klines) > 1:
-                klines = klines[:-1]
-            if len(klines) < 200:
-                scan_results[sym] = {"status": "insufficient_data", "candles": len(klines)}
-                continue
 
-            df = pd.DataFrame(klines)
-            df["symbol"] = sym
-
-            tf_cfg = tf_configs[0] if tf_configs else None
-            engine = SignalEngine(cfg, tf_config=tf_cfg)
-            signal = engine.process_backfill(df)
-
-            # Also check forming bar for a more recent crossover
-            live_signal = engine.process(df)
-            if live_signal:
-                if signal is None or live_signal.side != signal.side:
-                    logger.info(
-                        "[LIVE_INIT] %s forming-bar override: backfill=%s → live=%s",
-                        sym,
-                        signal.side if signal else "None",
-                        live_signal.side,
+            # ── INITIAL ENTRY: Copy dry-run position (same Rust PMax) ──
+            # Instead of process_backfill (Python PMax, different results),
+            # use dry-run Simulator's current position for identical entry direction
+            signal = None
+            sim = state.get("simulator")
+            sim_key = f"{sym}:{tf_label}" if tf_label else sym
+            if sim:
+                sim_positions = sim.positions
+                sim_pos = sim_positions.get(sim_key)
+                if sim_pos and sim_pos.condition != 0.0:
+                    from core.strategy.signals import Signal
+                    signal = Signal(
+                        timestamp=int(time.time() * 1000),
+                        symbol=sym,
+                        side=sim_pos.side,
+                        price=0,  # will be filled by market order
+                        rsi_value=0,
+                        atr_value=0,
+                        tf_label=tf_label,
+                        size_multiplier=1.0,
                     )
-                    signal = live_signal
+                    logger.info(
+                        "[LIVE_INIT] %s — copying dry-run position: %s (Rust PMax)",
+                        sym, sim_pos.side,
+                    )
 
-            last_price = float(df["close"].iloc[-1])
+            # Fallback: if no simulator or no position, use process_backfill
+            if signal is None:
+                klines = rest.fetch_klines_sync(sym, interval, limit=1500)
+                if len(klines) > 1:
+                    klines = klines[:-1]
+                if len(klines) < 200:
+                    scan_results[sym] = {"status": "insufficient_data", "candles": len(klines)}
+                    continue
+                df = pd.DataFrame(klines)
+                df["symbol"] = sym
+                tf_cfg = tf_configs[0] if tf_configs else None
+                engine = SignalEngine(cfg, tf_config=tf_cfg)
+                signal = engine.process_backfill(df)
+                if signal:
+                    logger.info(
+                        "[LIVE_INIT] %s — fallback process_backfill: %s",
+                        sym, signal.side,
+                    )
+
+            last_price = 0
+            try:
+                klines_price = rest.fetch_klines_sync(sym, interval, limit=2)
+                last_price = float(klines_price[-1]["close"]) if klines_price else 0
+            except Exception:
+                pass
 
             if signal:
                 # Set tf_label on signal
