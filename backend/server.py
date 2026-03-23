@@ -1871,7 +1871,7 @@ def _live_signal_scanner_loop() -> None:
 
     while _live_state["running"]:
       try:
-        time.sleep(5)
+        time.sleep(2)  # fast poll interval (was 5s)
 
         if not _live_state["running"] or not _live_state["active_symbols"]:
             continue
@@ -1888,7 +1888,7 @@ def _live_signal_scanner_loop() -> None:
         if current_bucket == last_scan_bucket:
             continue
         last_scan_bucket = current_bucket
-        time.sleep(10)
+        time.sleep(2)  # minimal wait for candle finalization (was 10s)
 
         logger.info("Live scanner: new %s candle — rescanning %d symbols",
                      tf, len(_live_state["active_symbols"]))
@@ -2287,10 +2287,10 @@ def _start_live_ws_loop(symbols: list[str]) -> None:
             asyncio.create_task(_renew_loop())
             asyncio.create_task(_daily_reconnect())
 
-        # 3b. REST Heartbeat — verify pending orders every 10s
+        # 3b. REST Heartbeat — verify pending orders every 3s (fast fill detection)
         async def _rest_heartbeat_loop():
             while _live_state["running"]:
-                await asyncio.sleep(10)
+                await asyncio.sleep(3)
                 if not _live_state["running"]:
                     break
                 with _live_lock:

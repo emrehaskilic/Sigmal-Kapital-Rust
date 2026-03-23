@@ -217,8 +217,8 @@ class LiveExecutor:
         # Every placed order gets a full lifecycle tracker.
         # REST heartbeat only verifies orders in ACK state (pending fill).
         self._order_states: dict[int, OrderState] = {}  # orderId → OrderState
-        # REST heartbeat interval (seconds)
-        self._rest_heartbeat_interval: float = 10.0
+        # REST heartbeat interval (seconds) — fast detection for missed fills
+        self._rest_heartbeat_interval: float = 3.0
         self._last_rest_heartbeat: float = 0.0
 
     @staticmethod
