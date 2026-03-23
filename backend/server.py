@@ -2464,33 +2464,59 @@ def live_start(body: dict):
             tf_configs = cfg["strategy"].get("timeframes", [])
             interval = tf_configs[0].get("timeframe", "3m") if tf_configs else cfg["strategy"].get("timeframe", "3m")
 
-            # ── INITIAL ENTRY: Copy dry-run position (same Rust PMax) ──
-            # Instead of process_backfill (Python PMax, different results),
-            # use dry-run Simulator's current position for identical entry direction
+            # ── INITIAL ENTRY: Smart DCA entry from dry-run state ──
+            # Instead of market entry, place limit order at dry-run's next DCA level
+            # This gives: same KC price, maker fee, better comparison baseline
             signal = None
+            dca_limit_entry = False  # flag: limit entry instead of market
+            dca_limit_price = 0.0
+            dca_limit_side = ""
+
             sim = state.get("simulator")
             sim_key = f"{sym}:{tf_label}" if tf_label else sym
             if sim:
                 sim_positions = sim.positions
                 sim_pos = sim_positions.get(sim_key)
                 if sim_pos and sim_pos.condition != 0.0:
-                    from core.strategy.signals import Signal
-                    signal = Signal(
-                        timestamp=int(time.time() * 1000),
-                        symbol=sym,
-                        side=sim_pos.side,
-                        price=0,  # will be filled by market order
-                        rsi_value=0,
-                        atr_value=0,
-                        tf_label=tf_label,
-                        size_multiplier=1.0,
-                    )
-                    logger.info(
-                        "[LIVE_INIT] %s — copying dry-run position: %s (Rust PMax)",
-                        sym, sim_pos.side,
-                    )
+                    # Dry-run has position — enter via limit at KC DCA level
+                    dca_limit_side = sim_pos.side
+                    # Get current KC for DCA level
+                    klines_kc = rest.fetch_klines_sync(sym, interval, limit=50)
+                    if len(klines_kc) >= 10:
+                        from core.strategy.indicators import keltner_channel as calc_kc_init
+                        kc_cfg_init = (tf_cfg or {}).get("keltner", {})
+                        df_kc_init = pd.DataFrame(klines_kc[:-1])
+                        _, kc_u_init, kc_l_init = calc_kc_init(
+                            df_kc_init["high"], df_kc_init["low"], df_kc_init["close"],
+                            kc_length=kc_cfg_init.get("length", 3),
+                            kc_multiplier=kc_cfg_init.get("multiplier", 0.5),
+                            atr_period=kc_cfg_init.get("atr_period", 2),
+                        )
+                        if dca_limit_side == "LONG":
+                            dca_limit_price = float(kc_l_init.iloc[-1])  # KC Lower
+                        else:
+                            dca_limit_price = float(kc_u_init.iloc[-1])  # KC Upper
 
-            # Fallback: if no simulator or no position, use process_backfill
+                    if dca_limit_price > 0:
+                        dca_limit_entry = True
+                        # Create signal for direction tracking (not for market entry)
+                        from core.strategy.signals import Signal
+                        signal = Signal(
+                            timestamp=int(time.time() * 1000),
+                            symbol=sym,
+                            side=dca_limit_side,
+                            price=dca_limit_price,
+                            rsi_value=0,
+                            atr_value=0,
+                            tf_label=tf_label,
+                            size_multiplier=1.0,
+                        )
+                        logger.info(
+                            "[LIVE_INIT] %s — DCA limit entry: %s @ %.4f (KC band, dry-run sync)",
+                            sym, dca_limit_side, dca_limit_price,
+                        )
+
+            # Fallback: if no simulator or no position, use process_backfill + market
             if signal is None:
                 klines = rest.fetch_klines_sync(sym, interval, limit=1500)
                 if len(klines) > 1:
@@ -2501,8 +2527,8 @@ def live_start(body: dict):
                 df = pd.DataFrame(klines)
                 df["symbol"] = sym
                 tf_cfg = tf_configs[0] if tf_configs else None
-                engine = SignalEngine(cfg, tf_config=tf_cfg)
-                signal = engine.process_backfill(df)
+                engine_fb = SignalEngine(cfg, tf_config=tf_cfg)
+                signal = engine_fb.process_backfill(df)
                 if signal:
                     logger.info(
                         "[LIVE_INIT] %s — fallback process_backfill: %s",
@@ -2520,22 +2546,63 @@ def live_start(body: dict):
                 # Set tf_label on signal
                 signal.tf_label = tf_label
 
-                # Mevcut trende aninda giris yap (dry-run gibi)
-                try:
-                    trades = executor.process_signal(signal, entry_time=int(time.time() * 1000))
-                    pair_state = "ACTIVE" if executor.is_active(sym) else "OBSERVING"
-                    logger.info(
-                        "[LIVE_INIT] %s — immediate entry %s @ %.4f (pair_state=%s)",
-                        sym, signal.side, signal.price, pair_state,
-                    )
+                if dca_limit_entry and dca_limit_price > 0:
+                    # ── LIMIT ENTRY at KC DCA level ──
+                    try:
+                        executor.configure_pair(sym, float(pair_configs[sym].get("margin", 100)),
+                                                int(pair_configs[sym].get("leverage", 10)))
+                        executor.activate_pair(sym)
+
+                        # Calculate margin
+                        if executor._dyncomp_enabled and executor._dyncomp_tiers:
+                            from core.strategy.risk_manager import get_dynamic_comp_pct, calc_step_margin
+                            comp_pct = get_dynamic_comp_pct(executor.balance, executor._dyncomp_tiers)
+                            margin = calc_step_margin(executor.balance, comp_pct)
+                        else:
+                            margin = executor._base_margin
+
+                        order_side = "BUY" if dca_limit_side == "LONG" else "SELL"
+                        pc = executor._pair_configs.get(sym)
+                        qty = executor._client.calc_quantity(sym, margin, pc.leverage if pc else 25, dca_limit_price)
+                        price = executor._client.calc_price(sym, dca_limit_price)
+
+                        if qty > 0:
+                            result = executor._client.limit_order(sym, order_side, qty, price)
+                            order_id = result.get("orderId", 0)
+                            logger.info(
+                                "[LIVE_INIT] %s — LIMIT %s qty=%.6f @ %.4f orderId=%s (DCA entry)",
+                                sym, order_side, qty, price, order_id,
+                            )
+                            # Track in state machine
+                            pos_key = f"{sym}:{tf_label}" if tf_label else sym
+                            if order_id > 0:
+                                executor._order_id_map[order_id] = (pos_key, "ENTRY")
+                                executor._track_order(order_id, sym, order_side, "ENTRY", price, qty, pos_key)
+
+                            pair_state = "ACTIVE"
+                        else:
+                            pair_state = "OBSERVING"
+                            logger.warning("[LIVE_INIT] %s — qty=0, skipping limit entry", sym)
+                    except Exception as e:
+                        logger.error("[LIVE_INIT] %s — limit entry failed: %s", sym, e)
+                        pair_state = "OBSERVING"
+                else:
+                    # ── MARKET ENTRY (fallback) ──
+                    try:
+                        trades = executor.process_signal(signal, entry_time=int(time.time() * 1000))
+                        pair_state = "ACTIVE" if executor.is_active(sym) else "OBSERVING"
+                        logger.info(
+                            "[LIVE_INIT] %s — market entry %s @ %.4f (pair_state=%s)",
+                            sym, signal.side, signal.price, pair_state,
+                        )
 
                     # Backtest parity: entry candle'da KC set edilmiyor,
                     # DCA/TP order konulmuyor. Sonraki candle scanner KC update yapacak.
                     # (Rust engine: pending_dca=0, pending_tp=0 at entry)
 
-                except Exception as e:
-                    logger.error("[LIVE_INIT] %s — immediate entry failed: %s", sym, e)
-                    pair_state = "OBSERVING"
+                    except Exception as e:
+                        logger.error("[LIVE_INIT] %s — market entry failed: %s", sym, e)
+                        pair_state = "OBSERVING"
 
                 scan_results[sym] = {
                     "status": "signal_detected",
