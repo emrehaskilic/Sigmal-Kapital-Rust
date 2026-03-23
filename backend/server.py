@@ -1871,8 +1871,8 @@ def _live_signal_scanner_loop() -> None:
 
     while _live_state["running"]:
       try:
-        # Event-driven: wait for WS candle close event OR fallback poll every 5s
-        triggered = _candle_close_event.wait(timeout=5)
+        # Event-driven: wait for WS candle close event OR fallback poll every 3s
+        triggered = _candle_close_event.wait(timeout=3)
         _candle_close_event.clear()
 
         if not _live_state["running"] or not _live_state["active_symbols"]:
@@ -1890,8 +1890,7 @@ def _live_signal_scanner_loop() -> None:
         if current_bucket == last_scan_bucket:
             continue
         last_scan_bucket = current_bucket
-        if not triggered:
-            time.sleep(1)  # fallback poll: small wait for finalization
+        time.sleep(1)  # wait 1s for candle data to finalize on Binance
 
         logger.info("Live scanner: new %s candle — rescanning %d symbols",
                      tf, len(_live_state["active_symbols"]))
@@ -1994,8 +1993,8 @@ def _live_signal_scanner_loop() -> None:
                             }
 
                     # ── STEP 2: KC update AFTER fill detection ──
-                    # Update DCA + TP prices from latest KC bands and replace orders
-                    # This runs AFTER process_candle so filled orders are already processed
+                    # Cancel ALL old orders first, then place fresh ones at new KC levels
+                    # This prevents orphan orders from accumulating on the exchange
                     if executor.has_position(sym, tf_label):
                         pos_update = executor.positions.get(pos_key)
                         if pos_update and pos_update.condition != 0.0:
@@ -2016,6 +2015,14 @@ def _live_signal_scanner_loop() -> None:
                                     new_dca = float(kc_u_upd.iloc[-1])
                                 pos_update.pending_tp_price = new_tp
                                 pos_update.pending_dca_price = new_dca
+                                # Cancel ALL orphan orders before placing new ones
+                                try:
+                                    executor._client.cancel_all_orders(sym)
+                                    logger.info("[KC_CLEANUP] %s — all old orders cancelled before fresh placement", sym)
+                                except Exception:
+                                    pass
+                                pos_update.pending_dca_order_id = 0
+                                pos_update.tp_order_id = 0
                                 executor._place_tp_order(pos_key, pos_update)
                                 executor._place_dca_orders(pos_key, pos_update)
                             except Exception as e:
@@ -2234,7 +2241,9 @@ def _start_live_ws_loop(symbols: list[str]) -> None:
         ws = BinanceWS(on_candle=_on_live_candle, on_book_ticker=_on_live_book_ticker, testnet=is_testnet)
         _live_ws_instance = ws
         await ws.connect()
-        tf_ws = tf_configs[0].get("timeframe", "3m") if tf_configs else "3m"
+        cfg_ws = state["config"]
+        tf_configs_ws = cfg_ws["strategy"].get("timeframes", [])
+        tf_ws = tf_configs_ws[0].get("timeframe", "3m") if tf_configs_ws else "3m"
         for sym in symbols:
             await ws.subscribe_book_ticker(sym)
             await ws.subscribe(sym, tf_ws)  # kline stream for candle close detection
