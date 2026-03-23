@@ -1436,7 +1436,17 @@ class LiveExecutor:
         elif order_type == "SL":
             trades = self._process_sl_fill_live(pos_key, pos, fill_price, fill_qty, order_id)
         elif order_type == "ENTRY":
-            pass  # Entry already handled by process_signal
+            # Limit entry fill — recover position from exchange
+            os = self._order_states.get(order_id)
+            if os:
+                symbol = os.symbol
+                tf_label = os.pos_key.split(":")[-1] if ":" in os.pos_key else "3m"
+                if not self.has_position(symbol, tf_label):
+                    msgs = self.recover_from_exchange(tf_label)
+                    for m in msgs:
+                        logger.info(m)
+                    self.activate_pair(symbol)
+                    logger.info("[ENTRY_FILL] %s — position recovered from exchange after limit entry fill", symbol)
 
         # Fill log (debug endpoint)
         self._fill_log.append({
