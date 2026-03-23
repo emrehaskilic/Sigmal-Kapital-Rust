@@ -1871,7 +1871,9 @@ def _live_signal_scanner_loop() -> None:
 
     while _live_state["running"]:
       try:
-        time.sleep(2)  # fast poll interval (was 5s)
+        # Event-driven: wait for WS candle close event OR fallback poll every 5s
+        triggered = _candle_close_event.wait(timeout=5)
+        _candle_close_event.clear()
 
         if not _live_state["running"] or not _live_state["active_symbols"]:
             continue
@@ -1888,7 +1890,8 @@ def _live_signal_scanner_loop() -> None:
         if current_bucket == last_scan_bucket:
             continue
         last_scan_bucket = current_bucket
-        time.sleep(2)  # minimal wait for candle finalization (was 10s)
+        if not triggered:
+            time.sleep(1)  # fallback poll: small wait for finalization
 
         logger.info("Live scanner: new %s candle — rescanning %d symbols",
                      tf, len(_live_state["active_symbols"]))
@@ -2129,6 +2132,17 @@ async def _on_live_book_ticker(ticker: dict) -> None:
         _live_ws_book_data[ticker["symbol"]] = ticker
 
 
+# ── Event-driven candle close trigger ──
+_candle_close_event = threading.Event()
+
+async def _on_live_candle(candle: dict) -> None:
+    """WS kline event — trigger scanner immediately on candle close."""
+    if candle.get("is_closed"):
+        _candle_close_event.set()
+        logger.info("[WS_KLINE] %s %s candle closed — triggering immediate scan",
+                    candle["symbol"], candle["interval"])
+
+
 def _start_live_ws_loop(symbols: list[str]) -> None:
     """Start WS bookTicker + User Data Stream for live mode."""
     global _live_ws_instance
@@ -2216,13 +2230,15 @@ def _start_live_ws_loop(symbols: list[str]) -> None:
         global _live_ws_instance
         is_testnet = _live_state.get("testnet", False)
 
-        # 1. Market data WS (bookTicker)
-        ws = BinanceWS(on_candle=_on_candle_noop, on_book_ticker=_on_live_book_ticker, testnet=is_testnet)
+        # 1. Market data WS (bookTicker + kline for candle close trigger)
+        ws = BinanceWS(on_candle=_on_live_candle, on_book_ticker=_on_live_book_ticker, testnet=is_testnet)
         _live_ws_instance = ws
         await ws.connect()
+        tf_ws = tf_configs[0].get("timeframe", "3m") if tf_configs else "3m"
         for sym in symbols:
             await ws.subscribe_book_ticker(sym)
-        logger.info("Live WS bookTicker subscribed for %d symbols", len(symbols))
+            await ws.subscribe(sym, tf_ws)  # kline stream for candle close detection
+        logger.info("Live WS bookTicker + kline(%s) subscribed for %d symbols", tf_ws, len(symbols))
 
         # 2. User Data Stream WS (order fills) — DUAL redundant connections
         uds_ws = None
