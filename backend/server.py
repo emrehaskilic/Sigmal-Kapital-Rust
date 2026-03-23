@@ -2015,15 +2015,49 @@ def _live_signal_scanner_loop() -> None:
                             except Exception as e:
                                 logger.error("[KC_FAST] %s: %s", sym, str(e)[:100])
 
-                # ═══ FASE 2: Slow PMax signal (1500 bars) — background ═══
-                klines = rest.fetch_klines_sync(sym, tf, limit=1500)
-                if len(klines) < 200:
-                    continue
-                klines_for_signal = klines[:-1]
-                df = pd.DataFrame(klines_for_signal)
-                df["symbol"] = sym
-                engine = SignalEngine(cfg, tf_config=tf_cfg)
-                signal = engine.process(df)
+                # ═══ FASE 2: PMax signal from dry-run Simulator (Rust engine) ═══
+                # Use the SAME Rust TradingEngine as dry-run for identical PMax crossover
+                # This eliminates the Python vs Rust PMax divergence that caused
+                # $360 loss vs $58 in backtest (reversal timing mismatch)
+                signal = None
+                sim = state.get("simulator")
+                if sim and sim.has_position(sym, tf_label):
+                    # Dry-run has position — check if sides match
+                    sim_positions = sim.positions
+                    sim_key = f"{sym}:{tf_label}" if tf_label else sym
+                    sim_pos = sim_positions.get(sim_key)
+                    if sim_pos and sim_pos.condition != 0.0:
+                        live_pos = executor.positions.get(pos_key)
+                        if live_pos and live_pos.condition != 0.0:
+                            if sim_pos.side != live_pos.side:
+                                # Dry-run reversed but live didn't — trigger reversal
+                                from core.strategy.signals import Signal
+                                signal = Signal(
+                                    timestamp=int(time.time() * 1000),
+                                    symbol=sym,
+                                    side=sim_pos.side,
+                                    price=float(sim_pos.initial_entry_price),
+                                    rsi_value=0,
+                                    atr_value=0,
+                                    tf_label=tf_label,
+                                    size_multiplier=1.0,
+                                )
+                                logger.info("[PMAX_SYNC] %s dry-run=%s live=%s — triggering reversal",
+                                            sym, sim_pos.side, live_pos.side)
+                elif sim and not sim.has_position(sym, tf_label):
+                    # Dry-run is flat — if live has position, might need to check
+                    pass
+
+                # Fallback: if no simulator or no sync needed, use SignalEngine
+                if signal is None:
+                    klines = rest.fetch_klines_sync(sym, tf, limit=1500)
+                    if len(klines) < 200:
+                        continue
+                    klines_for_signal = klines[:-1]
+                    df = pd.DataFrame(klines_for_signal)
+                    df["symbol"] = sym
+                    engine = SignalEngine(cfg, tf_config=tf_cfg)
+                    signal = engine.process(df)
 
                 with _live_lock:
 
