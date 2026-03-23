@@ -2066,12 +2066,13 @@ def _live_signal_scanner_loop() -> None:
                                                 executor._mark_order_canceled(oid)
                             if pending_entry_wrong:
                                 # Re-enter in correct direction via market
+                                re_price_sync = float(sim_pos.initial_entry_price) or 1.0
                                 from core.strategy.signals import Signal
                                 signal = Signal(
                                     timestamp=int(time.time() * 1000),
                                     symbol=sym,
                                     side=sim_pos.side,
-                                    price=0,
+                                    price=re_price_sync,
                                     rsi_value=0,
                                     atr_value=0,
                                     tf_label=tf_label,
@@ -2122,12 +2123,22 @@ def _live_signal_scanner_loop() -> None:
                             sim_re_key = f"{re_sym}:{tf_label}" if tf_label else re_sym
                             sim_re_pos = sim_re.positions.get(sim_re_key)
                             if sim_re_pos and sim_re_pos.condition != 0.0:
+                                # Get current price for signal
+                                re_price = 0.0
+                                try:
+                                    re_klines = rest.fetch_klines_sync(re_sym, tf, limit=2)
+                                    if re_klines:
+                                        re_price = float(re_klines[-1]["close"])
+                                except Exception:
+                                    pass
+                                if re_price <= 0:
+                                    re_price = float(sim_re_pos.initial_entry_price) or 1.0
                                 from core.strategy.signals import Signal
                                 re_signal = Signal(
                                     timestamp=int(time.time() * 1000),
                                     symbol=re_sym,
                                     side=sim_re_pos.side,
-                                    price=0,
+                                    price=re_price,
                                     rsi_value=0, atr_value=0,
                                     tf_label=tf_label,
                                     size_multiplier=1.0,
