@@ -1941,27 +1941,16 @@ def _live_signal_scanner_loop() -> None:
             if not _live_state["running"]:
                 break
             try:
-                klines = rest.fetch_klines_sync(sym, tf, limit=1500)
-                if len(klines) < 200:
+                # ═══ FASE 1: Fast KC update (50 bars) — DCA/TP orders ASAP ═══
+                klines_fast = rest.fetch_klines_sync(sym, tf, limit=50)
+                if len(klines_fast) < 10:
                     continue
 
-                last_closed = klines[-2] if len(klines) >= 2 else klines[-1]
-                klines_for_signal = klines[:-1]
-
-                df = pd.DataFrame(klines_for_signal)
-                df["symbol"] = sym
-
-                # Use tf_config for correct PMax parameters
-                engine = SignalEngine(cfg, tf_config=tf_cfg)
-                signal = engine.process(df)
-
-                # Position key includes tf_label (e.g. "BARDUSDT:3m")
+                last_closed = klines_fast[-2] if len(klines_fast) >= 2 else klines_fast[-1]
                 pos_key = f"{sym}:{tf_label}" if tf_label else sym
 
                 with _live_lock:
-                    # ── STEP 1: process_candle FIRST — detect fills + stop checks ──
-                    # CRITICAL: Must run BEFORE KC update to detect filled orders
-                    # before KC update replaces them with new order IDs
+                    # ── STEP 1: process_candle — detect fills + stop checks ──
                     if executor.has_position(sym, tf_label):
                         candle_close = float(last_closed["close"])
                         close_time = int(last_closed.get("close_time", 0))
@@ -1970,8 +1959,9 @@ def _live_signal_scanner_loop() -> None:
                         from core.strategy.indicators import atr as atr_indicator
                         dyn_sl_period = cfg["trading"].get("dynamic_sl", {}).get("atr_period", 12)
                         _current_atr = 0.0
-                        if len(df) > dyn_sl_period:
-                            _atr_s = atr_indicator(df["high"], df["low"], df["close"], dyn_sl_period)
+                        df_fast = pd.DataFrame(klines_fast[:-1])
+                        if len(df_fast) > dyn_sl_period:
+                            _atr_s = atr_indicator(df_fast["high"], df_fast["low"], df_fast["close"], dyn_sl_period)
                             _current_atr = float(_atr_s.iloc[-1]) if not pd.isna(_atr_s.iloc[-1]) else 0.0
                         exit_trades = executor.process_candle(sym, candle_high, candle_low, close_time, tf_label=tf_label, candle_close=candle_close, current_atr=_current_atr)
                         for t in exit_trades:
@@ -1983,7 +1973,6 @@ def _live_signal_scanner_loop() -> None:
                                 "rsi": 0,
                                 "source": f"LIVE_EXIT_{t.exit_reason}",
                             })
-                        # Update scan_results if position fully closed by TP/SL
                         if not executor.has_position(sym, tf_label):
                             _live_state["scan_results"][sym] = {
                                 "status": "closed_tp",
@@ -1992,17 +1981,16 @@ def _live_signal_scanner_loop() -> None:
                                 "last_price": float(last_closed["close"]),
                             }
 
-                    # ── STEP 2: KC update AFTER fill detection ──
-                    # Cancel ALL old orders first, then place fresh ones at new KC levels
-                    # This prevents orphan orders from accumulating on the exchange
+                    # ── STEP 2: Fast KC update (50 bars) — place DCA/TP immediately ──
                     if executor.has_position(sym, tf_label):
                         pos_update = executor.positions.get(pos_key)
                         if pos_update and pos_update.condition != 0.0:
                             try:
                                 from core.strategy.indicators import keltner_channel as calc_kc_update
                                 kc_cfg_u = (tf_cfg or {}).get("keltner", {})
+                                df_kc = pd.DataFrame(klines_fast[:-1])
                                 _, kc_u_upd, kc_l_upd = calc_kc_update(
-                                    df["high"], df["low"], df["close"],
+                                    df_kc["high"], df_kc["low"], df_kc["close"],
                                     kc_length=kc_cfg_u.get("length", 3),
                                     kc_multiplier=kc_cfg_u.get("multiplier", 0.5),
                                     atr_period=kc_cfg_u.get("atr_period", 2),
@@ -2015,10 +2003,9 @@ def _live_signal_scanner_loop() -> None:
                                     new_dca = float(kc_u_upd.iloc[-1])
                                 pos_update.pending_tp_price = new_tp
                                 pos_update.pending_dca_price = new_dca
-                                # Cancel ALL orphan orders before placing new ones
                                 try:
                                     executor._client.cancel_all_orders(sym)
-                                    logger.info("[KC_CLEANUP] %s — all old orders cancelled before fresh placement", sym)
+                                    logger.info("[KC_FAST] %s — orders cancelled + fresh KC placement", sym)
                                 except Exception:
                                     pass
                                 pos_update.pending_dca_order_id = 0
@@ -2026,7 +2013,19 @@ def _live_signal_scanner_loop() -> None:
                                 executor._place_tp_order(pos_key, pos_update)
                                 executor._place_dca_orders(pos_key, pos_update)
                             except Exception as e:
-                                logger.error("[KC_UPDATE] %s: %s", sym, str(e)[:100])
+                                logger.error("[KC_FAST] %s: %s", sym, str(e)[:100])
+
+                # ═══ FASE 2: Slow PMax signal (1500 bars) — background ═══
+                klines = rest.fetch_klines_sync(sym, tf, limit=1500)
+                if len(klines) < 200:
+                    continue
+                klines_for_signal = klines[:-1]
+                df = pd.DataFrame(klines_for_signal)
+                df["symbol"] = sym
+                engine = SignalEngine(cfg, tf_config=tf_cfg)
+                signal = engine.process(df)
+
+                with _live_lock:
 
                     # ── STEP 2.5: Re-entry after graduated TP full close ──
                     reentry_symbols = executor.pop_reentry_queue()
