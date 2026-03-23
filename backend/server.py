@@ -2115,9 +2115,30 @@ def _live_signal_scanner_loop() -> None:
                             continue  # already re-entered
                         if executor.circuit_breaker_triggered:
                             continue
-                        # Use backfill to find current PMax direction
-                        re_engine = SignalEngine(cfg, tf_config=tf_cfg)
-                        re_signal = re_engine.process_backfill(df)
+                        # Use dry-run Simulator for direction (same Rust PMax)
+                        re_signal = None
+                        sim_re = state.get("simulator")
+                        if sim_re:
+                            sim_re_key = f"{re_sym}:{tf_label}" if tf_label else re_sym
+                            sim_re_pos = sim_re.positions.get(sim_re_key)
+                            if sim_re_pos and sim_re_pos.condition != 0.0:
+                                from core.strategy.signals import Signal
+                                re_signal = Signal(
+                                    timestamp=int(time.time() * 1000),
+                                    symbol=re_sym,
+                                    side=sim_re_pos.side,
+                                    price=0,
+                                    rsi_value=0, atr_value=0,
+                                    tf_label=tf_label,
+                                    size_multiplier=1.0,
+                                )
+                                logger.info("[REENTRY] %s — dry-run says %s, re-entering", re_sym, sim_re_pos.side)
+                        # Fallback: process_backfill
+                        if re_signal is None:
+                            re_engine = SignalEngine(cfg, tf_config=tf_cfg)
+                            re_signal = re_engine.process_backfill(df)
+                            if re_signal:
+                                logger.info("[REENTRY] %s — fallback backfill: %s", re_sym, re_signal.side)
                         if re_signal:
                             re_signal.tf_label = tf_label
                             try:
