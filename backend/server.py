@@ -2044,9 +2044,54 @@ def _live_signal_scanner_loop() -> None:
                                 )
                                 logger.info("[PMAX_SYNC] %s dry-run=%s live=%s — triggering reversal",
                                             sym, sim_pos.side, live_pos.side)
+                        elif not live_pos or live_pos.condition == 0.0:
+                            # Live has no position (pending limit entry waiting)
+                            # Check if pending entry order is in wrong direction
+                            pending_entry_wrong = False
+                            for oid, (pk, otype) in list(executor._order_id_map.items()):
+                                if pk == pos_key and otype == "ENTRY":
+                                    os = executor._order_states.get(oid)
+                                    if os and os.status.value == "ACK":
+                                        # Pending entry exists — check direction
+                                        entry_side = "LONG" if os.side == "BUY" else "SHORT"
+                                        if entry_side != sim_pos.side:
+                                            # Wrong direction — cancel and re-enter
+                                            pending_entry_wrong = True
+                                            try:
+                                                executor._client.cancel_order(sym, oid)
+                                                executor._mark_order_canceled(oid)
+                                                logger.info("[PMAX_SYNC] %s cancelled pending %s entry #%d (dry-run=%s)",
+                                                            sym, entry_side, oid, sim_pos.side)
+                                            except Exception:
+                                                executor._mark_order_canceled(oid)
+                            if pending_entry_wrong:
+                                # Re-enter in correct direction via market
+                                from core.strategy.signals import Signal
+                                signal = Signal(
+                                    timestamp=int(time.time() * 1000),
+                                    symbol=sym,
+                                    side=sim_pos.side,
+                                    price=0,
+                                    rsi_value=0,
+                                    atr_value=0,
+                                    tf_label=tf_label,
+                                    size_multiplier=1.0,
+                                )
+                                logger.info("[PMAX_SYNC] %s — re-entering %s via market after cancel",
+                                            sym, sim_pos.side)
                 elif sim and not sim.has_position(sym, tf_label):
-                    # Dry-run is flat — if live has position, might need to check
-                    pass
+                    # Dry-run is flat — cancel any pending live entry orders
+                    for oid, (pk, otype) in list(executor._order_id_map.items()):
+                        if pk == pos_key and otype == "ENTRY":
+                            os = executor._order_states.get(oid)
+                            if os and os.status.value == "ACK":
+                                try:
+                                    executor._client.cancel_order(sym, oid)
+                                    executor._mark_order_canceled(oid)
+                                    logger.info("[PMAX_SYNC] %s cancelled pending entry #%d (dry-run is FLAT)",
+                                                sym, oid)
+                                except Exception:
+                                    executor._mark_order_canceled(oid)
 
                 # Fallback: if no simulator or no sync needed, use SignalEngine
                 if signal is None:
