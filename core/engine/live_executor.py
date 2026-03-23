@@ -209,6 +209,10 @@ class LiveExecutor:
         # Fill event log (for debug endpoint, last 50)
         self._fill_log: list[dict] = []
 
+        # ── Re-entry Queue ──
+        # When graduated TP fully closes a position, queue re-entry for next scanner cycle
+        self._reentry_queue: list[str] = []  # list of symbols needing re-entry
+
         # ── Order State Machine ──
         # Every placed order gets a full lifecycle tracker.
         # REST heartbeat only verifies orders in ACK state (pending fill).
@@ -359,6 +363,12 @@ class LiveExecutor:
                              os.symbol, os.order_id, e)
 
         return msgs
+
+    def pop_reentry_queue(self) -> list[str]:
+        """Return and clear symbols that need re-entry after TP full close."""
+        symbols = list(self._reentry_queue)
+        self._reentry_queue.clear()
+        return symbols
 
     # ------------------------------------------------------------------
     # Setup
@@ -1574,6 +1584,10 @@ class LiveExecutor:
                 pos.remaining_qty = 0.0
                 self._position_qty[key] = 0
                 self._cancel_all_grid_orders(key, pos)
+                # Queue re-entry: PMax still in same direction, should re-enter
+                if pos.symbol not in self._reentry_queue:
+                    self._reentry_queue.append(pos.symbol)
+                    logger.info("[REENTRY_QUEUED] %s dust closed — will re-enter on next scan", pos.symbol)
                 logger.info("[POS_CLOSED] %s dust closed", pos.symbol)
                 return trades
 
@@ -1584,6 +1598,10 @@ class LiveExecutor:
 
         if pos.condition == 0.0:
             self._cancel_all_grid_orders(key, pos)
+            # Queue re-entry: PMax still in same direction, should re-enter
+            if pos.symbol not in self._reentry_queue:
+                self._reentry_queue.append(pos.symbol)
+                logger.info("[REENTRY_QUEUED] %s fully closed via TP — will re-enter on next scan", pos.symbol)
             logger.info("[POS_CLOSED] %s fully closed via TP", pos.symbol)
         elif place_next_orders:
             # Before placing next orders, re-check dust (sync may have updated qty)
@@ -1594,6 +1612,9 @@ class LiveExecutor:
                 pos.remaining_qty = 0.0
                 self._position_qty[key] = 0
                 self._cancel_all_grid_orders(key, pos)
+                if pos.symbol not in self._reentry_queue:
+                    self._reentry_queue.append(pos.symbol)
+                    logger.info("[REENTRY_QUEUED] %s post-sync dust closed — will re-enter on next scan", pos.symbol)
             # else: Do NOT place new DCA/TP here — wait for next candle KC update
             # Backtest parity: elif means TP fill candle does not place new DCA/TP
             # Next scanner cycle will compute fresh KC bands and place orders

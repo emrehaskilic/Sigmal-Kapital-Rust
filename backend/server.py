@@ -2018,6 +2018,36 @@ def _live_signal_scanner_loop() -> None:
                             except Exception as e:
                                 logger.error("[KC_UPDATE] %s: %s", sym, str(e)[:100])
 
+                    # ── STEP 2.5: Re-entry after graduated TP full close ──
+                    reentry_symbols = executor.pop_reentry_queue()
+                    for re_sym in reentry_symbols:
+                        if re_sym != sym:
+                            continue
+                        if executor.has_position(re_sym, tf_label):
+                            continue  # already re-entered
+                        if executor.circuit_breaker_triggered:
+                            continue
+                        # Use backfill to find current PMax direction
+                        re_engine = SignalEngine(cfg, tf_config=tf_cfg)
+                        re_signal = re_engine.process_backfill(df)
+                        if re_signal:
+                            re_signal.tf_label = tf_label
+                            try:
+                                executor.refresh_balance()
+                                re_trades = executor.process_signal(re_signal, entry_time=int(time.time() * 1000))
+                                logger.info("[REENTRY] %s — re-entered %s @ %.4f after TP full close",
+                                            re_sym, re_signal.side, re_signal.price)
+                                _live_state["signal_log"].append({
+                                    "time": time.strftime("%H:%M:%S"),
+                                    "symbol": re_sym,
+                                    "side": re_signal.side,
+                                    "price": re_signal.price,
+                                    "rsi": round(re_signal.rsi_value, 2),
+                                    "source": "REENTRY_AFTER_TP_CLOSE",
+                                })
+                            except Exception as e:
+                                logger.error("[REENTRY] %s failed: %s", re_sym, str(e)[:100])
+
                     if signal:
                         # Set tf_label on signal so executor creates correct pos key
                         signal.tf_label = tf_label
